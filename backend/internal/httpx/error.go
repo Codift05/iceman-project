@@ -47,6 +47,7 @@ var katalog = map[string]struct {
 	"REFRESH_REUSED":      {http.StatusUnauthorized, "Sesi dihentikan demi keamanan. Silakan masuk kembali."},
 	"FORBIDDEN":           {http.StatusForbidden, "Anda tidak memiliki akses ke halaman ini."},
 	"NOT_FOUND":           {http.StatusNotFound, "Data yang diminta tidak ditemukan."},
+	"CONFLICT":            {http.StatusConflict, "Data serupa sudah ada atau sedang dipakai."},
 	"VALIDATION_FAILED":   {http.StatusUnprocessableEntity, "Periksa kembali isian yang ditandai."},
 	"AREA_NOT_SERVED":     {http.StatusUnprocessableEntity, "Alamat ini belum masuk wilayah layanan."},
 	"MIN_ORDER_NOT_MET":   {http.StatusUnprocessableEntity, "Jumlah pesanan belum memenuhi minimum."},
