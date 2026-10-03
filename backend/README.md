@@ -9,6 +9,7 @@ kebutuhan pada `02_SRS_Iceman_Apps.pdf`.
 ```bash
 make up      # basis data pada port 5433, sekaligus menyiapkan basis data uji
 make run     # server pada :8088, migrasi berjalan otomatis lebih dahulu
+make worker  # pekerja latar, pembuat slot harian
 make test    # seluruh uji termasuk uji konkurensi
 make down    # hentikan basis data
 ```
@@ -18,8 +19,13 @@ Butuh Go 1.26 dan Docker. Tidak ada yang perlu dipasang selain itu.
 ## Struktur
 
 ```
-cmd/api            titik masuk server HTTP
-internal/scheduling slot pengiriman dan kuota kapasitas
+cmd/api             titik masuk server HTTP
+cmd/worker          titik masuk pekerja latar
+cmd/seed            pembuat pengguna pengembangan
+internal/scheduling depo, wilayah layanan, slot pengiriman, dan kuota kapasitas
+internal/identity   kata sandi, token, faktor kedua, dan hak akses
+internal/worker     job latar di atas antrean River
+internal/audit      jejak audit yang ikut transaksi pemanggil
 internal/httpx      bentuk galat seragam dan pengenal permintaan
 internal/store      koneksi basis data dan penerapan migrasi
 db/migrations       migrasi goose, ditanam ke dalam binary
@@ -38,6 +44,12 @@ db/migrations       migrasi goose, ditanam ke dalam binary
 - Hak akses berbasis peran, diperiksa di middleware.
 - Jejak audit yang ditulis dalam transaksi yang sama dengan perubahannya, dan
   tidak dapat diubah maupun dihapus lewat aplikasi.
+- Pengelolaan depo beserta penentuan depo terdekat dari koordinat pelanggan.
+- Pengelolaan wilayah layanan dan slot pengiriman, termasuk kuota, hari libur,
+  dan batas pemesanan.
+- Ketersediaan slot untuk pelanggan, lengkap dengan alasan bila tidak dapat
+  dipilih, dan tawaran slot terdekat yang masih terbuka.
+- Pekerja latar yang membuat slot tiga puluh hari ke depan setiap hari.
 - Bentuk galat seragam dan pengenal permintaan.
 - Server HTTP dengan endpoint kesehatan dan mematikan diri dengan rapi.
 
@@ -61,10 +73,16 @@ Uji pada `internal/scheduling` adalah inti pembuktian rancangan, bukan pelengkap
 | `TestIzin_SesuaiMatriksPRD` | 38 kombinasi peran dan izin dikunci |
 | `TestSetCapacity_JejakIkutBatalSaatTransaksiGagal` | jejak audit batal bersama transaksinya |
 | `TestAudit_TidakDapatDiubahMaupunDihapus` | basis data menolak UPDATE dan DELETE pada jejak |
+| `TestEnqueueTx_IkutBatalSaatTransaksiBatal` | job antrean ikut batal bila transaksinya batal (AD-03) |
+| `TestGenerator_Idempoten` | pembuatan slot dijalankan ulang tidak menggandakan slot |
 
 Dua uji pembanding terakhir sengaja dipertahankan. Bila suatu saat ada yang
 mengusulkan menghapus `FOR UPDATE` demi kecepatan, jalankan keduanya lebih
 dahulu.
+
+Uji `TestEnqueueTx_IkutBatalSaatTransaksiBatal` sudah diperiksa dengan cara
+merusaknya: bila `InsertTx` diganti `Insert` biasa, uji itu gagal. Dengan
+begitu lulusnya memang berarti sesuatu.
 
 ## Port yang dipakai
 
@@ -133,3 +151,69 @@ orang lain tidak dapat dipakai ulang pada jendela tiga puluh detik yang sama.
 
 Modul bernama `github.com/iceman/backend`. Ganti ke alamat repositori yang
 sebenarnya sebelum rilis pertama.
+
+## Pekerja latar
+
+Antrean job memakai PostgreSQL yang sama dengan data aplikasi, bukan Redis atau
+layanan antrean terpisah. Itu pilihan sadar (Architecture AD-03): job dapat
+dimasukkan dalam transaksi yang sama dengan perubahan datanya, sehingga tidak
+mungkin ada job yang mengacu pada perubahan yang ternyata batal, atau perubahan
+tersimpan tanpa job susulannya.
+
+```bash
+make worker   # jalankan pekerja; migrasi antrean berjalan otomatis
+```
+
+Satu job sudah berjalan: pembuatan slot pengiriman tiga puluh hari ke depan
+untuk setiap wilayah layanan aktif, sekali sehari. Pembuatannya idempoten,
+bersandar pada unique index `(service_area_id, slot_date, window_start)`
+(DB-09), sehingga job dapat dicoba ulang kapan saja termasuk setelah gagal di
+tengah jalan. Penjadwalan hariannya dijalankan River hanya dari satu proses
+yang terpilih sebagai pemimpin, jadi menambah pekerja tidak membuat slot dibuat
+berkali kali.
+
+Pola jam operasional masih ditetapkan di kode (`scheduling.DefaultTemplates`:
+08.00, 11.00, dan 14.00) sampai Iceman memutuskan jam operasional dan cara
+menghitung kapasitas (OQ-007). Memindahkannya ke tabel konfigurasi adalah
+pekerjaan kecil yang menunggu keputusan itu.
+
+## Endpoint penjadwalan
+
+Endpoint terbuka dipakai aplikasi pelanggan sebelum masuk, saat memeriksa
+apakah alamatnya terjangkau dan jadwal apa yang tersedia. Isinya hanya data
+yang memang perlu diketahui calon pelanggan.
+
+```
+GET    /v1/public/depots/nearest?lat=&lng=
+GET    /v1/public/areas/:id/availability?from=&days=
+GET    /v1/public/areas/:id/slots/next
+```
+
+Sisanya butuh token dan izin.
+
+| Endpoint | Izin |
+|---|---|
+| `GET /v1/depots` | `depot.view` |
+| `GET /v1/depots/:id` | `depot.view` |
+| `POST /v1/depots` | `depot.manage` |
+| `PATCH /v1/depots/:id` | `depot.manage` |
+| `GET /v1/areas` | `area_slot.view` |
+| `POST /v1/areas` | `area_slot.manage` |
+| `PATCH /v1/areas/:id` | `area_slot.manage` |
+| `GET /v1/areas/:id/slots` | `area_slot.view` |
+| `POST /v1/slots` | `area_slot.manage` |
+| `PATCH /v1/slots/:id/capacity` | `area_slot.manage` |
+| `PATCH /v1/slots/:id/holiday` | `area_slot.manage` |
+
+Membuat depo hanya boleh dilakukan Super Admin. Admin Operasional memegang
+`depot.view` namun tidak `depot.manage`, karena menambah depo mengubah peta
+layanan dan bukan tindakan harian.
+
+Slot yang tidak dapat dipilih tetap dikirim ke pelanggan beserta alasannya
+(`FULL`, `CUTOFF_PASSED`, atau `HOLIDAY`), bukan disembunyikan. Menyembunyikan
+slot penuh membuat pelanggan mengira layanan tidak tersedia pada hari itu
+(UI/UX Bab 10.1).
+
+Tanggal slot terbit sebagai `"2026-10-04"`, bukan cap waktu. Cap waktu tengah
+malam mengundang klien menggesernya ke zona waktu lain dan menampilkan slot
+pada hari yang salah.
