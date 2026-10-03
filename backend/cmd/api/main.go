@@ -18,6 +18,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 
+	"github.com/iceman/backend/internal/audit"
 	"github.com/iceman/backend/internal/httpx"
 	"github.com/iceman/backend/internal/identity"
 	"github.com/iceman/backend/internal/store"
@@ -64,6 +65,18 @@ func main() {
 	}
 	checkPermission := func(c echo.Context, role, permission string) (bool, error) {
 		return ident.CanCode(c.Request().Context(), role, permission)
+	}
+	recordDenial := func(c echo.Context, permission string) {
+		ctx := c.Request().Context()
+		err := audit.RecordOutside(ctx, pool, audit.Entry{
+			Entity:  "access",
+			Action:  audit.ActionAccess,
+			Outcome: audit.OutcomeDenied,
+			Detail:  c.Request().Method + " " + c.Path() + " butuh " + permission,
+		})
+		if err != nil {
+			log.Error("mencatat penolakan akses gagal", "error", err)
+		}
 	}
 
 	e := echo.New()
@@ -119,7 +132,20 @@ func main() {
 			})
 		}
 		return c.JSON(http.StatusOK, map[string]any{"depots": out})
-	}, httpx.RequirePermission(checkPermission, "depot.view"))
+	}, httpx.RequirePermission(checkPermission, "depot.view", recordDenial))
+
+	// Penelusuran jejak audit, hanya untuk peran yang berwenang.
+	auditReader := audit.NewReader(pool)
+	secured.GET("/admin/audit-trail", func(c echo.Context) error {
+		rows, err := auditReader.List(c.Request().Context(), audit.Filter{
+			Entity:  c.QueryParam("entity"),
+			Outcome: c.QueryParam("outcome"),
+		})
+		if err != nil {
+			return httpx.Fail(c, "INTERNAL")
+		}
+		return c.JSON(http.StatusOK, map[string]any{"entries": rows})
+	}, httpx.RequirePermission(checkPermission, "audit.view", recordDenial))
 
 	go func() {
 		log.Info("server berjalan", "addr", addr)

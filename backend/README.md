@@ -36,6 +36,8 @@ db/migrations       migrasi goose, ditanam ke dalam binary
   token penyegar yang diputar setiap dipakai.
 - Faktor kedua berbasis waktu (TOTP), dengan satu kode hanya berlaku sekali.
 - Hak akses berbasis peran, diperiksa di middleware.
+- Jejak audit yang ditulis dalam transaksi yang sama dengan perubahannya, dan
+  tidak dapat diubah maupun dihapus lewat aplikasi.
 - Bentuk galat seragam dan pengenal permintaan.
 - Server HTTP dengan endpoint kesehatan dan mematikan diri dengan rapi.
 
@@ -57,6 +59,8 @@ Uji pada `internal/scheduling` adalah inti pembuktian rancangan, bukan pelengkap
 | `TestMFA_DuaVerifikasiBersamaanKodeSama` | delapan verifikasi bersamaan kode sama, tepat satu lolos |
 | `TestMFA_TokenTantanganTerkunciTujuannya` | token tantangan tidak dapat menyamar jadi token akses |
 | `TestIzin_SesuaiMatriksPRD` | 38 kombinasi peran dan izin dikunci |
+| `TestSetCapacity_JejakIkutBatalSaatTransaksiGagal` | jejak audit batal bersama transaksinya |
+| `TestAudit_TidakDapatDiubahMaupunDihapus` | basis data menolak UPDATE dan DELETE pada jejak |
 
 Dua uji pembanding terakhir sengaja dipertahankan. Bila suatu saat ada yang
 mengusulkan menghapus `FOR UPDATE` demi kecepatan, jalankan keduanya lebih
@@ -80,6 +84,28 @@ memakai port yang tidak dipakai siapa pun.
 
 Jangan pakai port di bagian bawah tabel. Bila butuh port baru, periksa lebih
 dahulu dengan `ss -lntp` dan `docker ps`, lalu tambahkan ke tabel ini.
+
+## Jejak audit
+
+Perubahan data kritis dicatat beserta nilai lama, nilai baru, pelaku, waktu,
+dan pengenal permintaan. Pencatatan memakai transaksi milik pemanggil, bukan
+transaksi sendiri, sehingga membatalkan perubahan juga membatalkan catatannya.
+Tanpa sifat ini, jejak dapat memuat perubahan yang sebenarnya tidak terjadi.
+
+Catatan bersifat tetap: pemicu pada basis data menolak UPDATE dan DELETE untuk
+siapa pun. Pembersihan karena masa simpan nanti dilakukan dengan melepas
+partisi, bukan menghapus baris, sehingga tidak membuka celah penghapusan satuan.
+
+Penolakan akses juga tercatat, lengkap dengan siapa yang mencoba, endpoint apa,
+dan izin apa yang kurang.
+
+```
+GET /v1/admin/audit-trail?entity=delivery_slots&outcome=DENIED
+```
+
+Pelaku dan pengenal permintaan dibawa lewat konteks, bukan lewat parameter
+setiap fungsi. Tanpa itu, seluruh fungsi di jalur perubahan data harus menambah
+dua parameter yang hanya diteruskan tanpa dipakai.
 
 ## Alur masuk dengan faktor kedua
 
