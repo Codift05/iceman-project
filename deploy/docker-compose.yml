@@ -1,0 +1,25 @@
+# Basis data untuk pengembangan lokal.
+#
+# Nilai dibaca dari berkas .env di akar repositori. Salin .env.example lebih
+# dahulu. Port sengaja tidak memakai 5432 agar tidak bentrok dengan PostgreSQL
+# lain yang mungkin sudah berjalan di mesin yang sama.
+services:
+  db:
+    image: postgres:18-alpine
+    container_name: iceman-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-iceman}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?isi POSTGRES_PASSWORD pada .env}
+      POSTGRES_DB: ${POSTGRES_DB:-iceman}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - iceman-db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-iceman} -d ${POSTGRES_DB:-iceman}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  iceman-db-data:

@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------------
+# Repositori ini publik. Isinya sengaja dibatasi pada kode rekayasa saja.
+#
+# Seluruh dokumen proyek dan data klien TIDAK ikut dipublikasikan, baik dalam
+# bentuk jadi (PDF, DOCX) maupun dalam bentuk sumber (modul Python penyusun
+# dokumen, berkas diagram, aset merek). Keduanya memuat hal yang sama, jadi
+# mengecualikan salah satu saja tidak cukup.
+# ---------------------------------------------------------------------------
+
+# Dokumen jadi
+*.pdf
+*.docx
+
+# Sumber dokumen: modul penyusun, diagram, wireframe, dan aset merek klien
+docs_kit/documents/
+docs_kit/assets/
+docs_kit/build/
+diagrams/
+_referensi/
+assets_sumber/
+
+# Perkakas pihak ketiga yang diunduh, bukan sumber
+*.jar
+
+# Kredensial sungguhan
+.env
+.env.*
+!.env.example
+
+# Keluaran Python dan Go
+__pycache__/
+*.pyc
+backend/bin/
+*.test
+*.out
+
+# Berkas sementara editor dan sistem
+.DS_Store
+*~
+*.swp
