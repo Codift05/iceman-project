@@ -95,6 +95,10 @@ func TestAuthenticate_AkunNonaktif(t *testing.T) {
 }
 
 // TC-AUT-07: peran berisiko tinggi tidak memperoleh sesi tanpa faktor kedua.
+//
+// Selama faktor kedua belum didaftarkan, yang dikembalikan adalah permintaan
+// mendaftar. Setelah didaftarkan, yang diminta adalah kodenya. Keduanya sama
+// sama tidak menerbitkan sesi.
 func TestAuthenticate_PeranBerisikoWajibFaktorKedua(t *testing.T) {
 	svc, pool := newService(t)
 	ctx := context.Background()
@@ -102,8 +106,8 @@ func TestAuthenticate_PeranBerisikoWajibFaktorKedua(t *testing.T) {
 	for _, role := range []string{"SUPER_ADMIN", "FINANCE"} {
 		_, email := seedUser(t, pool, role, "rahasia-yang-panjang")
 		_, err := svc.Authenticate(ctx, email, "rahasia-yang-panjang")
-		if !errors.Is(err, identity.ErrMFARequired) {
-			t.Fatalf("%s = %v, seharusnya ErrMFARequired", role, err)
+		if !errors.Is(err, identity.ErrMFAEnrollRequired) {
+			t.Fatalf("%s = %v, seharusnya ErrMFAEnrollRequired", role, err)
 		}
 	}
 

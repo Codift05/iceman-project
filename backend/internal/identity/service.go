@@ -19,6 +19,7 @@ var (
 	ErrAccountLocked      = errors.New("akun terkunci sementara")
 	ErrAccountInactive    = errors.New("akun tidak aktif")
 	ErrMFARequired        = errors.New("faktor kedua dibutuhkan")
+	ErrMFAEnrollRequired  = errors.New("faktor kedua wajib didaftarkan lebih dahulu")
 	ErrRefreshInvalid     = errors.New("token penyegar tidak sah")
 	ErrRefreshReused      = errors.New("token penyegar dipakai ulang")
 )
@@ -80,7 +81,8 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (*Us
 
 	const q = `
 		SELECT u.id, u.name, coalesce(u.email, ''), u.role_id, r.code, u.depot_id,
-		       u.status, coalesce(u.password_hash, ''), u.failed_attempts, u.locked_until
+		       u.status, coalesce(u.password_hash, ''), u.failed_attempts, u.locked_until,
+		       u.mfa_enabled_at
 		FROM   users u
 		JOIN   roles r ON r.id = u.role_id
 		WHERE  u.email = $1`
@@ -90,9 +92,11 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (*Us
 		hash        string
 		attempts    int
 		lockedUntil *time.Time
+		mfaEnabled  *time.Time
 	)
 	err := s.pool.QueryRow(ctx, q, email).Scan(&u.ID, &u.Name, &u.Email, &u.RoleID,
-		&u.RoleCode, &u.DepotID, &u.Status, &hash, &attempts, &lockedUntil)
+		&u.RoleCode, &u.DepotID, &u.Status, &hash, &attempts, &lockedUntil, &mfaEnabled)
+	mfaOn := mfaEnabled != nil
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Tetap jalankan perbandingan agar lamanya jawaban tidak membocorkan
@@ -120,15 +124,20 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (*Us
 		return nil, ErrCredentialsInvalid
 	}
 
-	if s.RequireMFA && mfaRoles[u.RoleCode] {
-		// Kredensial benar, namun sesi belum diterbitkan sampai faktor kedua
-		// diverifikasi. Percobaan gagal tidak ditambahkan karena kata sandinya
-		// memang benar.
-		return nil, ErrMFARequired
-	}
-
+	// Kata sandi sudah benar, sehingga penghitung percobaan gagal dikembalikan
+	// nol walau sesi belum tentu diterbitkan.
 	if err := s.recordSuccess(ctx, u.ID, now); err != nil {
 		return nil, err
+	}
+
+	// Faktor kedua diminta bila pengguna sudah mengaktifkannya, atau bila
+	// perannya mewajibkannya. Pengguna tetap dikembalikan agar pemanggil dapat
+	// menerbitkan token tantangan.
+	switch {
+	case mfaOn:
+		return &u, ErrMFARequired
+	case s.RequireMFA && mfaRoles[u.RoleCode]:
+		return &u, ErrMFAEnrollRequired
 	}
 	return &u, nil
 }

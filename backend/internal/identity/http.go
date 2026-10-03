@@ -36,3 +36,31 @@ func (s *Service) CanCode(ctx context.Context, roleCode, permission string) (boo
 	}
 	return s.Can(ctx, id, permission)
 }
+
+// Challenge menerbitkan token tantangan untuk alur masuk dua tahap.
+func (s *Service) Challenge(userID uuid.UUID, purpose string) (string, error) {
+	return s.signer.IssueChallenge(userID, purpose)
+}
+
+// ParseChallenge memeriksa token tantangan dan mengembalikan pengguna yang dituju.
+func (s *Service) ParseChallenge(raw, purpose string) (uuid.UUID, error) {
+	cl, err := s.signer.ParseChallenge(raw, purpose)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return cl.UserID, nil
+}
+
+// UserByID membaca pengguna beserta peran dan cakupan deponya.
+func (s *Service) UserByID(ctx context.Context, userID uuid.UUID) (*User, error) {
+	var u User
+	err := s.pool.QueryRow(ctx, `
+		SELECT u.id, u.name, coalesce(u.email, ''), u.role_id, r.code, u.depot_id, u.status
+		FROM   users u JOIN roles r ON r.id = u.role_id
+		WHERE  u.id = $1`, userID).
+		Scan(&u.ID, &u.Name, &u.Email, &u.RoleID, &u.RoleCode, &u.DepotID, &u.Status)
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}

@@ -85,6 +85,9 @@ func main() {
 	v1.POST("/auth/login", identHandler.Login)
 	v1.POST("/auth/refresh", identHandler.Refresh)
 	v1.POST("/auth/logout", identHandler.Logout)
+	v1.POST("/auth/mfa/verify", identHandler.MFAVerify)
+	v1.POST("/auth/mfa/enroll", identHandler.MFAEnroll)
+	v1.POST("/auth/mfa/confirm", identHandler.MFAConfirm)
 
 	secured := v1.Group("", httpx.RequireAuth(parseToken))
 	secured.GET("/me", identHandler.Me)

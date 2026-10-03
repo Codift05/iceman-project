@@ -32,6 +32,10 @@ db/migrations       migrasi goose, ditanam ke dalam binary
 - `scheduling.Reserve` mengambil kuota slot dengan `SELECT ... FOR UPDATE`,
   lengkap dengan pemeriksaan hari libur, batas cut-off, dan kapasitas.
 - `scheduling.Release` dan `scheduling.Move` untuk pembatalan dan penjadwalan ulang.
+- Autentikasi pengguna internal: argon2id, penguncian akun, token akses dan
+  token penyegar yang diputar setiap dipakai.
+- Faktor kedua berbasis waktu (TOTP), dengan satu kode hanya berlaku sekali.
+- Hak akses berbasis peran, diperiksa di middleware.
 - Bentuk galat seragam dan pengenal permintaan.
 - Server HTTP dengan endpoint kesehatan dan mematikan diri dengan rapi.
 
@@ -48,6 +52,11 @@ Uji pada `internal/scheduling` adalah inti pembuktian rancangan, bukan pelengkap
 | `TestConstraint_KuotaTidakBolehTerlampaui` | DB-01 menolak walau jalur kode lupa mengunci |
 | `TestPembanding_TanpaKunciKebobolan` | cara tanpa kunci baris benar benar kebobolan |
 | `TestPembanding_DenganKunciTidakKebobolan` | cara yang dipakai tidak kebobolan |
+| `TestRefresh_PemakaianUlangMembatalkanSeluruhSesi` | token penyegar dipakai ulang membatalkan semua sesi |
+| `TestRefresh_DuaPermintaanBersamaan` | delapan penyegaran bersamaan, tepat satu berhasil |
+| `TestMFA_DuaVerifikasiBersamaanKodeSama` | delapan verifikasi bersamaan kode sama, tepat satu lolos |
+| `TestMFA_TokenTantanganTerkunciTujuannya` | token tantangan tidak dapat menyamar jadi token akses |
+| `TestIzin_SesuaiMatriksPRD` | 38 kombinasi peran dan izin dikunci |
 
 Dua uji pembanding terakhir sengaja dipertahankan. Bila suatu saat ada yang
 mengusulkan menghapus `FOR UPDATE` demi kecepatan, jalankan keduanya lebih
@@ -71,6 +80,28 @@ memakai port yang tidak dipakai siapa pun.
 
 Jangan pakai port di bagian bawah tabel. Bila butuh port baru, periksa lebih
 dahulu dengan `ss -lntp` dan `docker ps`, lalu tambahkan ke tabel ini.
+
+## Alur masuk dengan faktor kedua
+
+Peran Super Admin dan Keuangan wajib memakai faktor kedua. Peran lain boleh
+mengaktifkannya sendiri, dan setelah aktif menjadi wajib.
+
+```
+POST /v1/auth/login          kata sandi benar
+                             -> { mfa_required: true, challenge_token, next }
+
+next = "enroll"              belum terdaftar
+  POST /v1/auth/mfa/enroll   -> { secret, provisioning_uri }
+  POST /v1/auth/mfa/confirm  kode pertama -> token akses dan penyegar
+
+next = "verify"              sudah terdaftar
+  POST /v1/auth/mfa/verify   kode -> token akses dan penyegar
+```
+
+Token tantangan berumur lima menit, membawa penanda jenis dan tujuan, serta
+tidak dapat dipakai sebagai token akses. Satu kode TOTP hanya berlaku sekali:
+langkah waktu yang sudah terpakai dicatat, sehingga kode yang sempat terlihat
+orang lain tidak dapat dipakai ulang pada jendela tiga puluh detik yang sama.
 
 ## Catatan
 

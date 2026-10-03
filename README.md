@@ -67,6 +67,10 @@ penguncian demi kecepatan, jalankan dulu keduanya.
 Pemakaian ulang dianggap tanda token tercuri, sehingga seluruh sesi pengguna itu
 dibatalkan sekaligus, bukan hanya sesi yang bersangkutan.
 
+Hal yang sama berlaku pada kode faktor kedua: langkah waktu yang sudah terpakai
+dicatat, sehingga satu kode tidak dapat dipakai dua kali walau dua permintaan
+datang pada detik yang sama.
+
 ## Uji
 
 ```
@@ -82,8 +86,10 @@ perilaku transaksi dan penguncian baris.
 
 - Kata sandi memakai argon2id dengan garam acak dan perbandingan waktu tetap.
 - Lima percobaan gagal mengunci akun selama lima belas menit.
-- Peran berisiko tinggi ditolak masuk sampai verifikasi faktor kedua tersedia,
-  bukan diloloskan sementara.
+- Faktor kedua berbasis waktu (TOTP) untuk peran berisiko tinggi, dengan satu
+  kode hanya berlaku sekali.
+- Token akses dan token tantangan membawa penanda jenis, sehingga token
+  tantangan tidak dapat menyamar menjadi token akses.
 - Token penyegar disimpan sebagai hash, bukan nilai aslinya.
 - Pemeriksaan izin berada di middleware, bukan tersebar di tiap handler.
 - Tidak ada kredensial di dalam kode. Seluruhnya dibaca dari lingkungan, dan
@@ -94,5 +100,5 @@ perilaku transaksi dan penguncian baris.
 Tahap awal. Yang sudah berdiri: fondasi basis data, pengelolaan kuota slot,
 autentikasi, sesi, dan hak akses berbasis peran.
 
-Belum ada: verifikasi faktor kedua, katalog produk, pemesanan, pembayaran,
-modul driver, dan pelacakan posisi.
+Belum ada: katalog produk, pemesanan, pembayaran, modul driver, dan pelacakan
+posisi.
