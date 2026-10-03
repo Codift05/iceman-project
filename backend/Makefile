@@ -8,12 +8,13 @@ DSN      ?= $(DATABASE_URL)
 TEST_DSN ?= $(subst /iceman?,/iceman_test?,$(DATABASE_URL))
 COMPOSE  := docker compose --env-file ../.env -f ../deploy/docker-compose.yml
 
-.PHONY: help up down logs run test test-short race lint tidy fresh seed
+.PHONY: help up down logs run worker test test-short race lint tidy fresh seed
 
 help:
 	@echo "up        jalankan basis data"
 	@echo "down      hentikan basis data"
 	@echo "run       jalankan server API (migrasi otomatis)"
+	@echo "worker    jalankan pekerja latar (pembuat slot harian)"
 	@echo "test      seluruh uji, termasuk konkurensi"
 	@echo "race      uji dengan deteksi kondisi balapan"
 	@echo "fresh     hapus basis data uji lalu uji ulang dari nol"
@@ -36,6 +37,9 @@ logs:
 
 run:
 	DATABASE_URL="$(DSN)" go run ./cmd/api
+
+worker:
+	DATABASE_URL="$(DSN)" go run ./cmd/worker
 
 test:
 	ICEMAN_TEST_DSN="$(TEST_DSN)" go test ./... -count=1
