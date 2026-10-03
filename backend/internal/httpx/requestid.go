@@ -3,6 +3,8 @@ package httpx
 import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+
+	"github.com/iceman/backend/internal/audit"
 )
 
 const headerRequestID = "X-Request-Id"
@@ -20,6 +22,11 @@ func RequestID() echo.MiddlewareFunc {
 			}
 			c.Set(ctxRequestID, id)
 			c.Response().Header().Set(headerRequestID, id)
+
+			// Pengenal ikut dibawa pada konteks agar jejak audit yang ditulis
+			// jauh di dalam lapisan layanan dapat dikaitkan dengan log.
+			req := c.Request()
+			c.SetRequest(req.WithContext(audit.WithRequestID(req.Context(), id)))
 			return next(c)
 		}
 	}

@@ -5,6 +5,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+
+	"github.com/iceman/backend/internal/audit"
 )
 
 const ctxPrincipal = "principal"
@@ -26,6 +28,13 @@ type ParseToken func(raw string) (*Principal, error)
 // CheckPermission memeriksa apakah sebuah peran memegang izin tertentu.
 type CheckPermission func(c echo.Context, role, permission string) (bool, error)
 
+// RecordDenial mencatat penolakan akses pada jejak audit.
+//
+// Dipasang sebagai fungsi agar paket ini tidak perlu mengenal basis data.
+// Kegagalan mencatat tidak boleh membuat permintaan yang semestinya ditolak
+// malah diteruskan, sehingga galatnya hanya diabaikan di sini.
+type RecordDenial func(c echo.Context, permission string)
+
 // RequireAuth memastikan permintaan membawa token akses yang sah.
 //
 // Pemeriksaan diletakkan di middleware, bukan di tiap handler, agar tidak ada
@@ -42,13 +51,21 @@ func RequireAuth(parse ParseToken) echo.MiddlewareFunc {
 				return Fail(c, "AUTH_REQUIRED")
 			}
 			c.Set(ctxPrincipal, p)
+
+			// Pelaku ikut dibawa pada konteks agar setiap perubahan data dapat
+			// dicatat beserta siapa yang melakukannya.
+			req := c.Request()
+			c.SetRequest(req.WithContext(audit.WithActor(req.Context(), p.UserID)))
 			return next(c)
 		}
 	}
 }
 
 // RequirePermission menolak permintaan yang perannya tidak memegang izin.
-func RequirePermission(check CheckPermission, permission string) echo.MiddlewareFunc {
+//
+// Setiap penolakan dicatat pada jejak audit, sesuai SRS-AUT-006 yang
+// mewajibkan percobaan akses yang ditolak dapat ditelusuri.
+func RequirePermission(check CheckPermission, permission string, onDeny RecordDenial) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			p := PrincipalFrom(c)
@@ -60,6 +77,9 @@ func RequirePermission(check CheckPermission, permission string) echo.Middleware
 				return Fail(c, "INTERNAL")
 			}
 			if !ok {
+				if onDeny != nil {
+					onDeny(c, permission)
+				}
 				return Fail(c, "FORBIDDEN")
 			}
 			return next(c)
