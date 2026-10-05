@@ -27,6 +27,7 @@ internal/catalog    produk, harga dasar, dan harga khusus pelanggan
 internal/customer   pelanggan, alamat pengiriman, dan termin kontrak
 internal/cart       keranjang di sisi server
 internal/order      checkout, transisi status, dan pesan ulang
+internal/delivery   penugasan driver, modul driver, dan pelacakan posisi
 internal/identity   kata sandi, token, faktor kedua, dan hak akses
 internal/worker     job latar di atas antrean River
 internal/audit      jejak audit yang ikut transaksi pemanggil
@@ -62,6 +63,11 @@ db/migrations       migrasi goose, ditanam ke dalam binary
 - Transisi status pesanan mengikuti matriks yang mengikat, termasuk pembatalan
   yang mengembalikan kuota dan penjadwalan ulang yang memindahkannya.
 - Pesan ulang dari pesanan sebelumnya memakai harga terkini.
+- Penugasan driver per depo, lengkap dengan penugasan ulang dan riwayatnya.
+- Modul driver: daftar tugas, pembaruan status, bukti serah terima, laporan
+  kendala, dan sinkronisasi perintah yang dibuat tanpa jaringan.
+- Pelacakan posisi driver dengan persetujuan, partisi bulanan, dan pembersihan
+  masa simpan lewat pelepasan partisi.
 - Bentuk galat seragam dan pengenal permintaan.
 - Server HTTP dengan endpoint kesehatan dan mematikan diri dengan rapi.
 
@@ -94,6 +100,14 @@ Uji pada `internal/scheduling` adalah inti pembuktian rancangan, bukan pelengkap
 | `TestCheckout_PenolakanTidakMenyisakanKuotaDanKeranjang` | checkout gagal tidak menyisakan kuota maupun keranjang kosong |
 | `TestMatriks_SesuaiTabelSRS` | matriks transisi cocok dengan tabel SRS Bab 5.1 |
 | `TestAlamat_PelangganLainTidakDapatMembaca` | alamat pelanggan lain tidak terbaca sama sekali |
+| `TestTransisiKirim_HanyaDriverYangDitugaskan` | izin saja tidak cukup, tugas siapa ini juga diperiksa |
+| `TestPenugasanUlang_DriverLamaKehilanganAkses` | penugasan ulang mencabut akses driver lama |
+| `TestMatriksKirim_SesuaiTabelSRS` | matriks pengiriman cocok dengan tabel SRS Bab 5.3 |
+| `TestSync_PerintahSamaTigaKaliSatuPerubahan` | DB-03, perintah kembar hanya diproses sekali |
+| `TestSync_DiprosesMenurutWaktuPerangkat` | antrean offline yang tiba tidak berurutan tetap benar |
+| `TestPosisi_KirimUlangTidakMenggandakan` | kunci alami posisi membuat kiriman ulang idempoten |
+| `TestPosisi_TanpaPersetujuanDitolak` | SEC-012, perekaman butuh persetujuan driver |
+| `TestMasaSimpanPosisi_MenyiapkanDanMelepasPartisi` | SRS-TRK-004, pembersihan lewat pelepasan partisi |
 
 Dua uji pembanding terakhir sengaja dipertahankan. Bila suatu saat ada yang
 mengusulkan menghapus `FOR UPDATE` demi kecepatan, jalankan keduanya lebih
@@ -113,6 +127,14 @@ dilepas, gagal karena kegagalannya berubah menjadi pelanggaran kekangan alih
 alih `SLOT_FULL`. Uji ini mulanya hanya memeriksa jumlah akhir dan tidak
 menggigit, karena kekangan DB-01 tetap menjaga jumlahnya benar. Yang
 membedakan ada tidaknya penguncian adalah bentuk galatnya, bukan jumlahnya.
+
+`TestTransisiKirim_HanyaDriverYangDitugaskan`, bila pemeriksaan driver yang
+ditugaskan dihapus, gagal bersama satu uji lain karena driver lain dan driver
+lama sama sama berhasil mengubah tugas orang.
+
+`TestSync_DiprosesMenurutWaktuPerangkat`, bila pengurutan menurut waktu
+perangkat dilepas, gagal dengan pesan "ASSIGNED ke ARRIVED tidak diizinkan"
+karena perintah diproses mengikuti urutan kedatangan.
 
 ## Port yang dipakai
 
@@ -313,3 +335,106 @@ sehingga DB-08 tetap memeriksa konsistensi total.
 Penyedia pembayaran belum disambungkan. Job pembuatan tagihan sudah diantre
 dalam transaksi yang sama dengan pesanan, tinggal mengisi pemanggilan
 penyedianya.
+
+Pengelolaan pengguna internal belum punya endpoint. Membuat driver beserta
+deponya untuk sekarang lewat `make seed ROLE=DRIVER DEPOT=MDO-01`. Driver wajib
+terikat satu depo karena DB-10 mewajibkan driver dan pesanan berasal dari depo
+yang sama, dan perintah seed menolak peran DRIVER tanpa depo agar akunnya tidak
+jadi lalu penugasannya gagal tanpa sebab yang jelas.
+
+Perkiraan waktu tiba belum dihitung. SRS-TRK-003 berstatus Should Have dan
+memerlukan mesin routing yang berjalan sendiri. Kolomnya sudah ada pada baris
+pengiriman dan ikut dikirim ke peta, bernilai kosong sampai mesinnya
+disambungkan.
+
+Penyiaran posisi lewat kanal realtime belum ada. Peta sekarang dibaca dengan
+permintaan biasa ke `/v1/tracking/live`. Pencatatan posisinya sudah berjalan
+penuh, dan SRS-TRK-002 memang mewajibkan kegagalan kanal realtime tidak
+menghentikan pencatatan, jadi menambahkannya nanti tidak mengubah yang sudah
+ada.
+
+## Pengiriman dan modul driver
+
+Satu pesanan satu baris pengiriman (DB-05). Penugasan ulang mengubah baris itu,
+bukan menambah baris baru, sehingga tidak mungkin ada dua driver yang sama sama
+merasa bertugas. Riwayat penugasannya disimpan tersendiri agar tetap dapat
+ditelusuri.
+
+Driver dan pesanan wajib berasal dari depo yang sama (DB-10). Karena menyangkut
+tiga tabel, ini dijaga pemicu basis data, dan diperiksa juga di kode supaya
+galatnya dapat dibaca admin.
+
+Seluruh driver memegang izin `delivery.update_own`, jadi izin saja tidak
+membedakan tugas siapa sebuah pengiriman. Matriks transisi menandai perpindahan
+mana yang hanya boleh dilakukan driver yang ditugaskan, dan pemeriksaannya
+memakai pengenal dari token, bukan dari parameter.
+
+Modul driver berjalan di perangkat yang sering kehilangan sinyal, sehingga dua
+hal menjadi bawaan: setiap perintah membawa pengenal buatan perangkat agar
+pengiriman ulang tidak diproses dua kali (DB-03), dan setiap perubahan
+menyimpan waktu perangkat di samping waktu server. Waktu server yang dipakai
+untuk urutan resmi, karena jam perangkat dapat meleset atau diubah.
+
+Perintah diproses mengikuti urutan waktu perangkat, bukan urutan kedatangan.
+Antrean lokal dapat terkirim tidak berurutan, dan memproses "tiba" sebelum
+"berangkat" akan ditolak matriks padahal driver mengerjakannya dengan benar.
+
+```
+POST /v1/driver/sync
+  { "commands": [ { "client_event_id": "...", "delivery_id": "...",
+                    "status": "ARRIVED", "device_time": "..." } ] }
+  -> { "results": [ { "outcome": "CONFLICT", "server_status": "DELIVERED",
+                      "reason": "..." } ] }
+```
+
+Konflik dilaporkan di dalam badan jawaban, bukan sebagai status HTTP gagal,
+karena satu kumpulan dapat memuat perintah yang berhasil dan yang berkonflik
+sekaligus. Satu status HTTP tidak dapat mewakili keduanya.
+
+| Endpoint | Izin |
+|---|---|
+| `GET /v1/deliveries` | `dispatch.manage` |
+| `POST /v1/deliveries` | `dispatch.manage` |
+| `PUT /v1/deliveries/:id/sequence` | `dispatch.manage` |
+| `POST /v1/deliveries/:id/status` | `dispatch.manage` |
+| `GET /v1/deliveries/:id` | `order.view` |
+| `GET /v1/tracking/live` | `tracking.view` |
+| `GET /v1/deliveries/:id/trail` | `tracking.view` |
+| `GET /v1/driver/tasks` | `delivery.view_own` |
+| `POST /v1/driver/tasks/:id/status` | `delivery.update_own` |
+| `POST /v1/driver/tasks/:id/proof` | `delivery.update_own` |
+| `POST /v1/driver/tasks/:id/positions` | `delivery.update_own` |
+| `PUT /v1/driver/tracking-consent` | `delivery.update_own` |
+| `POST /v1/driver/sync` | `delivery.update_own` |
+
+Izin peta posisi dipisahkan dari pengelolaan dispatch, karena posisi driver
+adalah data pribadi dan yang boleh melihat peta belum tentu boleh mengatur
+penugasan.
+
+## Pelacakan posisi dan data pribadi
+
+Posisi driver adalah data pribadi, dan pelacakannya menyentuh urusan pemantauan
+karyawan (SEC-012). Tiga hal mengikuti dari itu.
+
+Perekaman tidak berjalan sebelum driver menyetujuinya, dan pencabutan
+persetujuan menghentikannya seketika karena diperiksa setiap kali posisi
+dikirim. Rekaman yang sudah ada tidak dihapus: itu bukti pengiriman yang sudah
+berlangsung.
+
+Perekaman hanya aktif saat driver sedang menuju lokasi atau sudah tiba. Di luar
+itu, pelacakan melampaui keperluan operasional.
+
+Pembacaan jejak posisi tercatat pada jejak audit, sehingga siapa yang
+membukanya dapat ditelusuri.
+
+Tabel posisi dipartisi menurut bulan. Masa simpan tiga puluh hari dibersihkan
+dengan melepas partisi, bukan menghapus baris: melepas partisi hampir seketika
+dan tidak mengunci tabel, sedangkan DELETE pada puluhan juta baris mengunci dan
+membengkakkan tabel sampai autovacuum menyusulnya. Posisi terakhir dan
+perkiraan tiba disalin ke baris pengiriman agar tetap tersedia setelah rekaman
+mentah dihapus.
+
+Driver yang posisinya tidak diperbarui lebih dari lima belas menit ditandai
+tidak terpantau, bukan ditampilkan pada posisi usang. Menampilkan posisi lama
+seolah terkini membuat admin menelepon driver yang disangka berhenti, padahal
+yang hilang hanya sinyalnya.
