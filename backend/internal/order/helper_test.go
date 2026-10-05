@@ -236,3 +236,6 @@ func (l *lingkungan) buatAdmin(t *testing.T) uuid.UUID {
 // timeDepan adalah batas pemesanan yang masih jauh, dipakai slot uji yang
 // harus selalu dapat dipesan.
 func timeDepan() time.Time { return time.Now().Add(20 * time.Hour) }
+
+// timeLewat adalah batas pemesanan yang sudah terlewat.
+func timeLewat() time.Time { return time.Now().Add(-time.Hour) }
