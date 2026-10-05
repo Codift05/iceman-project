@@ -64,6 +64,9 @@ func NewWorker(d Deps, opt Options) (*river.Client[pgx.Tx], error) {
 	if err := river.AddWorkerSafely(workers, &CreatePaymentWorker{Deps: d}); err != nil {
 		return nil, fmt.Errorf("mendaftarkan pekerja pembuat tagihan: %w", err)
 	}
+	if err := river.AddWorkerSafely(workers, &LocationRetentionWorker{Deps: d}); err != nil {
+		return nil, fmt.Errorf("mendaftarkan pekerja masa simpan posisi: %w", err)
+	}
 
 	queues := opt.Queues
 	if queues == nil {
@@ -84,6 +87,17 @@ func NewWorker(d Deps, opt Options) (*river.Client[pgx.Tx], error) {
 			river.PeriodicInterval(24*time.Hour),
 			func() (river.JobArgs, *river.InsertOpts) {
 				return GenerateSlotsArgs{Days: 30}, nil
+			},
+			&river.PeriodicJobOpts{RunOnStart: true},
+		))
+
+		// Partisi posisi driver disiapkan dan dibersihkan sekali sehari.
+		// Dijalankan saat pekerja mulai juga, supaya penyebaran yang terlambat
+		// tidak membuat pencatatan posisi gagal karena partisinya belum ada.
+		periodic = append(periodic, river.NewPeriodicJob(
+			river.PeriodicInterval(24*time.Hour),
+			func() (river.JobArgs, *river.InsertOpts) {
+				return LocationRetentionArgs{RetentionDays: 30}, nil
 			},
 			&river.PeriodicJobOpts{RunOnStart: true},
 		))

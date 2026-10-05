@@ -104,3 +104,28 @@ func tungguSlot(t *testing.T, pool *pgxpool.Pool, areaID uuid.UUID, mau int) {
 
 // mustTemplates adalah pola slot bawaan yang dipakai pekerja.
 func mustTemplates() []scheduling.Template { return scheduling.DefaultTemplates }
+
+// tungguPartisi menunggu sampai sebuah partisi ada atau hilang.
+//
+// Job berjalan di goroutine lain, jadi keadaannya tidak langsung terlihat.
+// Menunggu dengan batas waktu lebih jujur daripada tidur sekian detik lalu
+// berharap sudah selesai.
+func tungguPartisi(t *testing.T, pool *pgxpool.Pool, nama string, mauAda bool) {
+	t.Helper()
+	ctx := context.Background()
+	batas := time.Now().Add(20 * time.Second)
+
+	var ada bool
+	for time.Now().Before(batas) {
+		err := pool.QueryRow(ctx,
+			`SELECT exists(SELECT 1 FROM pg_class WHERE relname = $1)`, nama).Scan(&ada)
+		if err != nil {
+			t.Fatalf("memeriksa partisi %s: %v", nama, err)
+		}
+		if ada == mauAda {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("partisi %s keberadaannya %v, seharusnya %v", nama, ada, mauAda)
+}
