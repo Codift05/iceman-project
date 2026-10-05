@@ -41,14 +41,24 @@ run:
 worker:
 	DATABASE_URL="$(DSN)" go run ./cmd/worker
 
+# -p 1 menjalankan paket uji satu per satu, tidak serentak.
+#
+# Seluruh paket memakai satu basis data uji yang sama, dan beberapa uji perlu
+# memulai dari keadaan yang bersih secara menyeluruh: penentuan depo terdekat
+# memilih di antara semua depo aktif, sehingga ujinya menonaktifkan seluruh
+# depo lebih dahulu. Dijalankan serentak, penonaktifan itu ikut mematikan depo
+# milik paket lain yang sedang berjalan, dan ujinya gagal sesekali tanpa pola.
+#
+# Pilihan lain adalah satu basis data per paket, namun untuk ukuran uji ini
+# biayanya tidak sepadan: seluruh uji selesai dalam beberapa detik.
 test:
-	ICEMAN_TEST_DSN="$(TEST_DSN)" go test ./... -count=1
+	ICEMAN_TEST_DSN="$(TEST_DSN)" go test ./... -count=1 -p 1
 
 test-short:
-	ICEMAN_TEST_DSN="$(TEST_DSN)" go test ./... -short -count=1
+	ICEMAN_TEST_DSN="$(TEST_DSN)" go test ./... -short -count=1 -p 1
 
 race:
-	ICEMAN_TEST_DSN="$(TEST_DSN)" go test ./... -race -count=1
+	ICEMAN_TEST_DSN="$(TEST_DSN)" go test ./... -race -count=1 -p 1
 
 seed:
 	go run ./cmd/seed -role "$(ROLE)" -email "$(EMAIL)" -password "$(PASSWORD)"
