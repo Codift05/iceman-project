@@ -61,6 +61,9 @@ func NewWorker(d Deps, opt Options) (*river.Client[pgx.Tx], error) {
 	if err := river.AddWorkerSafely(workers, &GenerateSlotsWorker{Deps: d}); err != nil {
 		return nil, fmt.Errorf("mendaftarkan pekerja pembuat slot: %w", err)
 	}
+	if err := river.AddWorkerSafely(workers, &CreatePaymentWorker{Deps: d}); err != nil {
+		return nil, fmt.Errorf("mendaftarkan pekerja pembuat tagihan: %w", err)
+	}
 
 	queues := opt.Queues
 	if queues == nil {
