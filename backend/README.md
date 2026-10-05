@@ -23,6 +23,10 @@ cmd/api             titik masuk server HTTP
 cmd/worker          titik masuk pekerja latar
 cmd/seed            pembuat pengguna pengembangan
 internal/scheduling depo, wilayah layanan, slot pengiriman, dan kuota kapasitas
+internal/catalog    produk, harga dasar, dan harga khusus pelanggan
+internal/customer   pelanggan, alamat pengiriman, dan termin kontrak
+internal/cart       keranjang di sisi server
+internal/order      checkout, transisi status, dan pesan ulang
 internal/identity   kata sandi, token, faktor kedua, dan hak akses
 internal/worker     job latar di atas antrean River
 internal/audit      jejak audit yang ikut transaksi pemanggil
@@ -50,6 +54,14 @@ db/migrations       migrasi goose, ditanam ke dalam binary
 - Ketersediaan slot untuk pelanggan, lengkap dengan alasan bila tidak dapat
   dipilih, dan tawaran slot terdekat yang masih terbuka.
 - Pekerja latar yang membuat slot tiga puluh hari ke depan setiap hari.
+- Katalog produk beserta harga khusus per pelanggan kontrak.
+- Pelanggan, alamat pengiriman, dan termin pembayaran kontrak.
+- Keranjang di sisi server yang menghitung ulang harga setiap kali dibaca.
+- Pembuatan pesanan lengkap dengan penguncian kuota slot, idempotensi, dan
+  pengantrean pembuatan tagihan dalam satu transaksi.
+- Transisi status pesanan mengikuti matriks yang mengikat, termasuk pembatalan
+  yang mengembalikan kuota dan penjadwalan ulang yang memindahkannya.
+- Pesan ulang dari pesanan sebelumnya memakai harga terkini.
 - Bentuk galat seragam dan pengenal permintaan.
 - Server HTTP dengan endpoint kesehatan dan mematikan diri dengan rapi.
 
@@ -75,14 +87,32 @@ Uji pada `internal/scheduling` adalah inti pembuktian rancangan, bukan pelengkap
 | `TestAudit_TidakDapatDiubahMaupunDihapus` | basis data menolak UPDATE dan DELETE pada jejak |
 | `TestEnqueueTx_IkutBatalSaatTransaksiBatal` | job antrean ikut batal bila transaksinya batal (AD-03) |
 | `TestGenerator_Idempoten` | pembuatan slot dijalankan ulang tidak menggandakan slot |
+| `TestCheckout_DuaBersamaanKuotaTerakhirSatuBerhasil` | SRS-ORD-002, dua checkout bersamaan menghasilkan tepat satu pesanan |
+| `TestCheckout_DuaPuluhBersamaanKuotaLimaLimaBerhasil` | kegagalan berupa SLOT_FULL, bukan pelanggaran kekangan |
+| `TestCheckout_KuotaDanPesananSelaluSamaBanyak` | tidak ada kuota tanpa pesanan, tidak ada pesanan tanpa kuota |
+| `TestCheckout_KunciIdempotensiBersamaanSatuPesanan` | permintaan kembar serentak tetap satu pesanan |
+| `TestCheckout_PenolakanTidakMenyisakanKuotaDanKeranjang` | checkout gagal tidak menyisakan kuota maupun keranjang kosong |
+| `TestMatriks_SesuaiTabelSRS` | matriks transisi cocok dengan tabel SRS Bab 5.1 |
+| `TestAlamat_PelangganLainTidakDapatMembaca` | alamat pelanggan lain tidak terbaca sama sekali |
 
 Dua uji pembanding terakhir sengaja dipertahankan. Bila suatu saat ada yang
 mengusulkan menghapus `FOR UPDATE` demi kecepatan, jalankan keduanya lebih
 dahulu.
 
-Uji `TestEnqueueTx_IkutBatalSaatTransaksiBatal` sudah diperiksa dengan cara
-merusaknya: bila `InsertTx` diganti `Insert` biasa, uji itu gagal. Dengan
-begitu lulusnya memang berarti sesuatu.
+Tiga uji sudah diperiksa dengan cara merusak kode yang diujinya lebih dahulu,
+supaya lulusnya memang berarti sesuatu:
+
+`TestEnqueueTx_IkutBatalSaatTransaksiBatal`, bila `InsertTx` diganti `Insert`
+biasa, gagal karena job bertahan walau transaksinya dibatalkan.
+
+`TestAlamat_PelangganLainTidakDapatMembaca`, bila saringan `customer_id`
+dihapus, gagal karena pelanggan lain berhasil membaca alamat itu.
+
+`TestCheckout_DuaPuluhBersamaanKuotaLimaLimaBerhasil`, bila `FOR UPDATE`
+dilepas, gagal karena kegagalannya berubah menjadi pelanggaran kekangan alih
+alih `SLOT_FULL`. Uji ini mulanya hanya memeriksa jumlah akhir dan tidak
+menggigit, karena kekangan DB-01 tetap menjaga jumlahnya benar. Yang
+membedakan ada tidaknya penguncian adalah bentuk galatnya, bukan jumlahnya.
 
 ## Port yang dipakai
 
@@ -217,3 +247,69 @@ slot penuh membuat pelanggan mengira layanan tidak tersedia pada hari itu
 Tanggal slot terbit sebagai `"2026-10-04"`, bukan cap waktu. Cap waktu tengah
 malam mengundang klien menggesernya ke zona waktu lain dan menampilkan slot
 pada hari yang salah.
+
+## Alur pesanan
+
+Pembuatan pesanan adalah bagian dengan aturan terbanyak, dan urutannya
+mengikuti dua diagram alur checkout pada SRS Bab 4.3.
+
+Seluruh pemeriksaan yang tidak memerlukan kunci dikerjakan lebih dahulu, di
+luar transaksi: kunci idempotensi, isi keranjang, kepemilikan alamat, keaktifan
+wilayah, kecocokan slot dengan wilayah, dan termin pelanggan. Baru setelah
+semuanya lolos, transaksi dimulai dan baris slot dikunci. Mengunci lebih awal
+berarti permintaan yang jelas salah ikut menahan pelanggan lain yang mengincar
+slot yang sama.
+
+Di dalam transaksi, lima hal terjadi bersama: kuota slot diambil, pesanan dan
+isinya disimpan, keranjang dikosongkan, riwayat status dicatat, dan job
+pembuatan tagihan diantre.
+
+Keranjang sengaja tidak menyimpan harga. Harga dihitung ulang setiap keranjang
+dibaca, sehingga perubahan harga oleh admin langsung tercermin. Harga baru
+disalin pada saat pesanan dibuat, karena sejak itu nilainya harus tetap
+(BR-007).
+
+Pesanan menyimpan salinan nama produk, kemasan, harga satuan, ongkos kirim, dan
+alamat. Tanpa salinan itu, menonaktifkan produk atau menyunting alamat akan
+mengubah pesanan yang sudah disetujui.
+
+| Endpoint | Izin |
+|---|---|
+| `GET /v1/public/products` | terbuka |
+| `GET /v1/products` | `product.view` |
+| `POST /v1/products` | `product.manage` |
+| `PUT /v1/products/:id/contract-price` | `product.manage` |
+| `GET /v1/customers` | `customer.view` |
+| `POST /v1/customers` | `customer.manage` |
+| `POST /v1/customers/:id/addresses` | `customer.manage` |
+| `PUT /v1/customers/:id/contract-term` | `customer.manage_terms` |
+| `GET /v1/customers/:id/cart` | `order.create_manual` |
+| `POST /v1/customers/:id/cart/items` | `order.create_manual` |
+| `POST /v1/customers/:id/orders/:orderID/reorder` | `order.create_manual` |
+| `GET /v1/orders` | `order.view` |
+| `POST /v1/orders` | `order.create_manual` |
+| `POST /v1/orders/:id/status` | `order.manage` |
+| `POST /v1/orders/:id/cancel` | `order.manage` |
+| `POST /v1/orders/:id/reschedule` | `order.manage` |
+
+Penolakan `SLOT_FULL` disertai tawaran jadwal terdekat yang masih terbuka.
+Tanpa itu, satu satunya jalan bagi pelanggan adalah mencoba slot satu per satu.
+
+## Yang menunggu keputusan klien
+
+Rute pelanggan untuk keranjang, checkout, dan riwayat belum dipasang karena
+OQ-002 belum diputuskan: cara pelanggan masuk dan kanal pengiriman kode OTP.
+Dua dari empat pilihannya mengirim OTP lewat WhatsApp, yang sudah dikeluarkan
+dari lingkup, sehingga pilihannya perlu ditinjau ulang.
+
+Seluruh jalur keranjang dan checkout sudah berjalan dan teruji lewat rute
+pesanan manual (SRS-ORD-006), dengan aturan yang sama persis. Yang belum ada
+hanya lapisan autentikasi pelanggannya.
+
+Promo belum diterapkan. SRS-CAT-003 berstatus Should Have dan diskon tetap nol
+sampai aturannya diputuskan, namun nilainya sudah dihitung di jalur checkout
+sehingga DB-08 tetap memeriksa konsistensi total.
+
+Penyedia pembayaran belum disambungkan. Job pembuatan tagihan sudah diantre
+dalam transaksi yang sama dengan pesanan, tinggal mengisi pemanggilan
+penyedianya.
