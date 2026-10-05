@@ -17,6 +17,7 @@ import (
 	"github.com/iceman/backend/internal/catalog"
 	"github.com/iceman/backend/internal/customer"
 	"github.com/iceman/backend/internal/order"
+	"github.com/iceman/backend/internal/scheduling"
 	"github.com/iceman/backend/internal/store"
 	"github.com/iceman/backend/internal/worker"
 )
@@ -63,7 +64,8 @@ func siapkan(t *testing.T) *lingkungan {
 		pool: pool, produk: produk, pelanggan: pelanggan, keranjang: keranjang,
 		queue: queue,
 		pesanan: order.NewOrders(order.Deps{
-			Pool: pool, Carts: keranjang, Customers: pelanggan, Queue: queue,
+			Pool: pool, Carts: keranjang, Customers: pelanggan,
+			Slots: scheduling.NewSlots(pool), Queue: queue,
 		}),
 	}
 }

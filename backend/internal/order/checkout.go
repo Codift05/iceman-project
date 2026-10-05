@@ -25,6 +25,10 @@ type Deps struct {
 	Pool      *pgxpool.Pool
 	Carts     *cart.Carts
 	Customers *customer.Customers
+	// Slots dipakai menawarkan jadwal terdekat ketika slot pilihan pelanggan
+	// ternyata penuh. Boleh kosong; tanpa itu penolakan tetap terjadi, hanya
+	// tanpa tawaran penggantinya.
+	Slots *scheduling.Slots
 	// Queue boleh kosong. Bila kosong, job susulan tidak diantre dan
 	// pembuatan pesanan tetap berhasil. Itu dipakai uji yang tidak
 	// memerlukan antrean, bukan keadaan produksi.
@@ -340,4 +344,31 @@ func actorFrom(ctx context.Context) *uuid.UUID {
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// NextAvailableFor menawarkan jadwal terdekat yang masih terbuka pada wilayah
+// yang sama dengan slot yang diminta.
+//
+// Dipakai saat slot pilihan pelanggan penuh. Diagram alur checkout pada SRS
+// mewajibkan penolakan SLOT_FULL disertai tawaran slot terdekat: pelanggan
+// yang slotnya penuh perlu tahu kapan ia bisa, bukan hanya bahwa ia tidak bisa.
+//
+// Mengembalikan nil tanpa galat bila tidak ada yang tersedia atau bila layanan
+// penjadwalan tidak disetel. Ketiadaan tawaran bukan kegagalan; penolakannya
+// sendiri tetap terkirim.
+func (o *Orders) NextAvailableFor(ctx context.Context, slotID uuid.UUID) *scheduling.Availability {
+	if o.d.Slots == nil {
+		return nil
+	}
+	var areaID uuid.UUID
+	err := o.d.Pool.QueryRow(ctx,
+		`SELECT service_area_id FROM delivery_slots WHERE id = $1`, slotID).Scan(&areaID)
+	if err != nil {
+		return nil
+	}
+	got, err := o.d.Slots.NextAvailable(ctx, areaID, time.Now())
+	if err != nil {
+		return nil
+	}
+	return got
 }

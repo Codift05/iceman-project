@@ -453,3 +453,52 @@ func TestCheckout_PesananManualDitandaiKanalnya(t *testing.T) {
 		t.Fatalf("kuota terpakai %d, seharusnya 1", n)
 	}
 }
+
+// TestCheckout_SlotPenuhMenawarkanJadwalTerdekat menjaga janji pada diagram
+// alur checkout: penolakan SLOT_FULL disertai tawaran slot terdekat.
+//
+// Tanpa tawaran itu, satu satunya jalan bagi pelanggan adalah mencoba slot
+// satu per satu sampai ada yang berhasil.
+func TestCheckout_SlotPenuhMenawarkanJadwalTerdekat(t *testing.T) {
+	l := siapkan(t)
+	ctx := context.Background()
+	w := l.buatWilayah(t)
+
+	penuh := l.buatSlotKhusus(t, w.AreaID, 1, 1, timeDepan(), false, "08:00")
+	kosong := l.buatSlotKhusus(t, w.AreaID, 5, 0, timeDepan(), false, "11:00")
+
+	p := l.buatPembeli(t, w.AreaID, customer.TypeRetail)
+	balok := l.buatProduk(t, "Es Balok", 2500000, 1)
+	l.isiKeranjang(t, p, balok, 1)
+
+	_, err := l.pesanan.Checkout(ctx, order.CheckoutInput{
+		CustomerID: p.ID, AddressID: p.AddressID, SlotID: penuh,
+	})
+	if !errors.Is(err, scheduling.ErrSlotFull) {
+		t.Fatalf("galat %v, seharusnya ErrSlotFull", err)
+	}
+
+	tawaran := l.pesanan.NextAvailableFor(ctx, penuh)
+	if tawaran == nil {
+		t.Fatal("seharusnya ada tawaran jadwal terdekat")
+	}
+	if tawaran.ID != kosong {
+		t.Fatalf("tawaran menunjuk slot %s, seharusnya %s", tawaran.ID, kosong)
+	}
+	if !tawaran.Selectable {
+		t.Fatal("slot yang ditawarkan seharusnya dapat dipilih")
+	}
+}
+
+// TestCheckout_TanpaJadwalLainTawaranKosong menjaga agar ketiadaan tawaran
+// bukan kegagalan. Penolakannya sendiri tetap terkirim.
+func TestCheckout_TanpaJadwalLainTawaranKosong(t *testing.T) {
+	l := siapkan(t)
+	ctx := context.Background()
+	w := l.buatWilayah(t)
+	penuh := l.buatSlotKhusus(t, w.AreaID, 1, 1, timeDepan(), false, "08:00")
+
+	if tawaran := l.pesanan.NextAvailableFor(ctx, penuh); tawaran != nil {
+		t.Fatalf("tidak ada slot lain, tawaran seharusnya kosong: %+v", tawaran)
+	}
+}
