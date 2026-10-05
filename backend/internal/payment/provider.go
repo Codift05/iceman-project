@@ -3,6 +3,7 @@ package payment
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
@@ -78,12 +79,33 @@ func (ManualProvider) Charge(_ context.Context, in ChargeRequest) (*ChargeResult
 		t := time.Now().Add(in.ExpiresIn)
 		berakhir = &t
 	}
-	// Referensi dibuat dari nomor pesanan agar tetap unik dan dapat
-	// ditelusuri ke pesanannya tanpa membuka basis data.
+	// Referensi memuat nomor pesanan agar dapat ditelusuri tanpa membuka
+	// basis data, dan sebuah pembeda acak agar tetap unik.
+	//
+	// Pembeda itu perlu karena satu pesanan dapat punya beberapa tagihan
+	// berurutan: tagihan yang kedaluwarsa diganti yang baru. Tanpa pembeda,
+	// tagihan pengganti bertabrakan dengan kekangan keunikan referensi
+	// penyedia, dan pelanggan tidak dapat mencoba lagi.
+	pembeda, err := pembedaAcak()
+	if err != nil {
+		return nil, fmt.Errorf("membangkitkan pembeda referensi: %w", err)
+	}
 	return &ChargeResult{
-		Ref:       "MANUAL-" + in.OrderNo,
+		Ref:       "MANUAL-" + in.OrderNo + "-" + pembeda,
 		ExpiresAt: berakhir,
 	}, nil
+}
+
+// pembedaAcak membangkitkan pembeda pendek untuk referensi pembayaran.
+//
+// Dibangkitkan acak, bukan dari penghitung atau cap waktu, agar dua tagihan
+// yang dibuat pada saat yang sama tetap berbeda tanpa perlu penguncian.
+func pembedaAcak() (string, error) {
+	buf := make([]byte, 4)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 // SupportsRefund menjawab tidak: refund manual dicatat, bukan diotomatiskan.

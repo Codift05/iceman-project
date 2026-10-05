@@ -169,8 +169,21 @@ func TestPenyediaManual_MembuatTagihanTanpaLayananLuar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("membuat tagihan: %v", err)
 	}
-	if hasil.Ref != "MANUAL-ICE-261005-00001" {
+	// Referensi memuat nomor pesanan agar dapat ditelusuri, dan sebuah
+	// pembeda agar tagihan pengganti tidak bertabrakan dengan yang lama.
+	if !strings.HasPrefix(hasil.Ref, "MANUAL-ICE-261005-00001-") {
 		t.Fatalf("referensi %q, seharusnya dapat ditelusuri ke pesanannya", hasil.Ref)
+	}
+
+	lagi, err := p.Charge(context.Background(), payment.ChargeRequest{
+		OrderNo: "ICE-261005-00001", AmountCents: 25000,
+	})
+	if err != nil {
+		t.Fatalf("membuat tagihan kedua: %v", err)
+	}
+	if lagi.Ref == hasil.Ref {
+		t.Fatal("dua tagihan untuk pesanan yang sama seharusnya beda referensi, " +
+			"karena referensi penyedia bersifat unik")
 	}
 	// Tanpa masa berlaku yang diminta, tagihannya tidak kedaluwarsa.
 	if hasil.ExpiresAt != nil {
