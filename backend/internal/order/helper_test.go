@@ -239,3 +239,13 @@ func timeDepan() time.Time { return time.Now().Add(20 * time.Hour) }
 
 // timeLewat adalah batas pemesanan yang sudah terlewat.
 func timeLewat() time.Time { return time.Now().Add(-time.Hour) }
+
+// produkKetersediaan menyusun masukan pengubahan produk dengan penanda ketersediaan,
+// dipakai uji yang membedakan produk habis dari produk yang dihentikan.
+func produkKetersediaan(prod *catalog.Product, aktif, tersedia bool) catalog.ProductInput {
+	return catalog.ProductInput{
+		Name: prod.Name, Category: prod.Category, Packaging: prod.Packaging,
+		BasePriceCents: prod.BasePriceCents, MinOrderQty: prod.MinOrderQty,
+		IsActive: &aktif, IsAvailable: &tersedia,
+	}
+}
