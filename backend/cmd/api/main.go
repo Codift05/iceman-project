@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -15,8 +16,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/riverqueue/river"
 
 	"github.com/iceman/backend/internal/audit"
 	"github.com/iceman/backend/internal/cart"
@@ -26,6 +30,7 @@ import (
 	"github.com/iceman/backend/internal/httpx"
 	"github.com/iceman/backend/internal/identity"
 	"github.com/iceman/backend/internal/order"
+	"github.com/iceman/backend/internal/payment"
 	"github.com/iceman/backend/internal/scheduling"
 	"github.com/iceman/backend/internal/store"
 	"github.com/iceman/backend/internal/worker"
@@ -253,6 +258,27 @@ func main() {
 	secured.POST("/deliveries/:id/status", deliveryHandler.ChangeStatus,
 		izin("dispatch.manage"))
 
+	// Pembayaran. Penyedia belum dipilih, sehingga penyedia manual dipakai:
+	// tagihan dicatat dan pembayarannya dikonfirmasi admin. Jalur itu tetap
+	// dipakai setelah QRIS aktif, untuk pelanggan yang membayar lewat transfer
+	// atau tunai.
+	pay := payment.NewService(payment.Deps{Pool: pool, Provider: payment.ManualProvider{}})
+	payHandler := payment.NewHandler(pay, webhookVerifier(log), queueAdapter{queue: queue})
+
+	// Webhook terbuka tanpa token, karena yang memanggilnya penyedia
+	// pembayaran, bukan pengguna. Keasliannya dijaga tanda tangan, bukan
+	// autentikasi pengguna, dan permintaan tanpa tanda tangan sah ditolak
+	// serta dicatat.
+	v1.POST("/webhooks/payment", payHandler.Webhook)
+
+	secured.GET("/payments", payHandler.List, izin("payment.view"))
+	secured.GET("/payments/:id", payHandler.Get, izin("payment.view"))
+	secured.POST("/orders/:id/payments", payHandler.Charge, izin("payment.manage"))
+	secured.GET("/orders/:id/payments", payHandler.ListForOrder, izin("payment.view"))
+	secured.POST("/payments/:id/refund", payHandler.Refund, izin("refund.process"))
+	secured.GET("/payments/events/review", payHandler.EventsNeedingReview,
+		izin("payment.manage"))
+
 	// Penelusuran jejak audit, hanya untuk peran yang berwenang.
 	auditReader := audit.NewReader(pool)
 	secured.GET("/admin/audit-trail", func(c echo.Context) error {
@@ -308,4 +334,41 @@ func env(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// queueAdapter menyambungkan lapisan HTTP pembayaran dengan antrean job.
+//
+// Diletakkan di sini agar paket pembayaran tidak mengimpor paket pekerja.
+// Paket pesanan sudah mengimpor pekerja untuk mengantre job, dan pekerja
+// memanggil pembayaran, sehingga impor itu akan membentuk lingkaran.
+type queueAdapter struct{ queue *river.Client[pgx.Tx] }
+
+// QueuePaymentEvent mengantre pemrosesan satu event webhook.
+func (q queueAdapter) QueuePaymentEvent(r *http.Request, eventRowID uuid.UUID) error {
+	if q.queue == nil {
+		return fmt.Errorf("antrean job belum tersedia")
+	}
+	_, err := q.queue.Insert(r.Context(),
+		worker.ProcessPaymentEventArgs{EventRowID: eventRowID}, nil)
+	return err
+}
+
+// webhookVerifier menyusun verifikator tanda tangan webhook dari lingkungan.
+//
+// Bila kuncinya belum diisi, verifikator tetap dibuat namun tanpa kunci,
+// sehingga seluruh webhook ditolak. Itu disengaja: lebih baik pembayaran tidak
+// terkonfirmasi otomatis daripada endpoint terbuka bagi siapa pun yang tahu
+// alamatnya.
+func webhookVerifier(log *slog.Logger) payment.Verifier {
+	kunci := os.Getenv("PAYMENT_WEBHOOK_SECRET")
+	if kunci == "" {
+		log.Warn("PAYMENT_WEBHOOK_SECRET belum diisi, seluruh webhook pembayaran akan ditolak. " +
+			"Isi setelah penyedia pembayaran dipilih.")
+	}
+	return payment.HMACVerifier{
+		Secret: []byte(kunci),
+		Header: env("PAYMENT_WEBHOOK_HEADER", "X-Signature"),
+		Algo:   env("PAYMENT_WEBHOOK_ALGO", "sha256"),
+		Prefix: os.Getenv("PAYMENT_WEBHOOK_PREFIX"),
+	}
 }
