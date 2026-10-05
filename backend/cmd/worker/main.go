@@ -7,6 +7,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -14,11 +16,43 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/riverqueue/river"
 
+	"github.com/iceman/backend/internal/order"
+	"github.com/iceman/backend/internal/payment"
 	"github.com/iceman/backend/internal/store"
 	"github.com/iceman/backend/internal/worker"
 )
+
+// paymentAdapter menyambungkan pekerja dengan domain pembayaran.
+//
+// Hanya menyederhanakan bentuk jawabannya, dan menerjemahkan penolakan yang
+// tidak layak dicoba ulang. Pesanan yang sudah lunas atau sudah batal tidak
+// akan berubah seberapa kali pun jobnya diulang, jadi mengulangnya hanya
+// mengisi antrean dengan pekerjaan yang pasti gagal.
+type paymentAdapter struct{ svc *payment.Service }
+
+// Charge membuat tagihan untuk sebuah pesanan.
+func (a paymentAdapter) Charge(ctx context.Context, orderID uuid.UUID) error {
+	_, err := a.svc.Charge(ctx, orderID)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, payment.ErrAlreadyPaid),
+		errors.Is(err, payment.ErrOrderNotPayable),
+		errors.Is(err, order.ErrNotFound):
+		return fmt.Errorf("%w: %v", worker.ErrChargeNotRetryable, err)
+	default:
+		return err
+	}
+}
+
+// ApplyEvent memproses satu event webhook yang sudah tersimpan.
+func (a paymentAdapter) ApplyEvent(ctx context.Context, eventRowID uuid.UUID) error {
+	_, err := a.svc.ApplyEvent(ctx, eventRowID)
+	return err
+}
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -47,8 +81,15 @@ func main() {
 	}
 	log.Info("migrasi antrean diterapkan")
 
+	// Layanan pembayaran disambungkan lewat penyambung, bukan diserahkan
+	// langsung, karena paket pekerja tidak boleh mengimpor paket pembayaran:
+	// paket pesanan sudah mengimpor pekerja, dan pembayaran mengimpor pesanan.
+	pay := payment.NewService(payment.Deps{Pool: pool, Provider: payment.ManualProvider{}})
+
 	maxWorkers := envInt("WORKER_CONCURRENCY", 5)
-	client, err := worker.NewWorker(worker.Deps{Pool: pool, Log: log}, worker.Options{
+	client, err := worker.NewWorker(worker.Deps{
+		Pool: pool, Log: log, Payments: paymentAdapter{svc: pay},
+	}, worker.Options{
 		Queues: map[string]river.QueueConfig{
 			river.QueueDefault: {MaxWorkers: maxWorkers},
 		},

@@ -8,10 +8,12 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
@@ -38,10 +40,37 @@ func NewClient(pool *pgxpool.Pool) (*river.Client[pgx.Tx], error) {
 	return river.NewClient(riverpgxv5.New(pool), &river.Config{})
 }
 
+// ErrChargeNotRetryable menandai kegagalan pembuatan tagihan yang tidak layak
+// dicoba ulang, misalnya pesanannya sudah lunas atau sudah batal.
+//
+// Dibungkus di sisi pemanggil, bukan diperiksa di sini dengan mengenali galat
+// domain pembayaran, karena paket ini tidak boleh mengimpor paket pembayaran.
+var ErrChargeNotRetryable = errors.New("tagihan tidak dapat dibuat dan tidak perlu dicoba ulang")
+
+// PaymentOps adalah apa yang dibutuhkan pekerja dari domain pembayaran.
+//
+// Dinyatakan sebagai antarmuka di sini, bukan dengan mengimpor paket
+// pembayaran, karena paket pesanan mengimpor paket ini untuk mengantre job.
+// Mengimpor pembayaran dari sini akan membentuk lingkaran: pesanan ke pekerja,
+// pekerja ke pembayaran, pembayaran ke pesanan. Penyambungnya dipasang di
+// titik masuk aplikasi, pola yang sama dengan penyambung identitas pada
+// lapisan HTTP.
+type PaymentOps interface {
+	// Charge membuat tagihan untuk sebuah pesanan. Kegagalan yang tidak layak
+	// dicoba ulang dibungkus dengan ErrChargeNotRetryable.
+	Charge(ctx context.Context, orderID uuid.UUID) error
+	// ApplyEvent memproses satu event webhook yang sudah tersimpan.
+	ApplyEvent(ctx context.Context, eventRowID uuid.UUID) error
+}
+
 // Deps adalah apa yang dibutuhkan pekerja saat menjalankan job.
 type Deps struct {
 	Pool *pgxpool.Pool
 	Log  *slog.Logger
+	// Payments boleh kosong. Bila kosong, job yang membutuhkannya hanya
+	// mencatat peringatan dan ditandai selesai, sehingga antrean tidak
+	// tersumbat pada lingkungan yang belum menyetelnya.
+	Payments PaymentOps
 }
 
 // Options mengatur bagaimana pekerja dijalankan.
@@ -66,6 +95,9 @@ func NewWorker(d Deps, opt Options) (*river.Client[pgx.Tx], error) {
 	}
 	if err := river.AddWorkerSafely(workers, &LocationRetentionWorker{Deps: d}); err != nil {
 		return nil, fmt.Errorf("mendaftarkan pekerja masa simpan posisi: %w", err)
+	}
+	if err := river.AddWorkerSafely(workers, &ProcessPaymentEventWorker{Deps: d}); err != nil {
+		return nil, fmt.Errorf("mendaftarkan pekerja pemroses event pembayaran: %w", err)
 	}
 
 	queues := opt.Queues
