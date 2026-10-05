@@ -15,6 +15,20 @@ import (
 
 // kode membangkitkan kode TOTP yang berlaku saat ini dari sebuah rahasia,
 // meniru apa yang ditampilkan aplikasi autentikator di ponsel.
+// langkahBerikutnya mengembalikan awal langkah TOTP sesudah langkah yang
+// sedang berjalan.
+//
+// Dihitung dari batas langkah, bukan dengan menambahkan tiga puluh satu detik
+// pada waktu sekarang. Penambahan sederhana itu melompat dua langkah bila
+// waktu sekarang sedang berada di detik terakhir sebuah langkah, dan kode dua
+// langkah ke depan berada di luar toleransi satu langkah yang diterima server.
+// Akibatnya uji gagal kira kira satu dari tiga puluh kali dijalankan, yang
+// jauh lebih merugikan daripada bug yang dicarinya.
+func langkahBerikutnya(t time.Time) time.Time {
+	const langkah = 30
+	return time.Unix((t.Unix()/langkah+1)*langkah, 0)
+}
+
 func kode(t *testing.T, secret string, at time.Time) string {
 	t.Helper()
 	c, err := totp.GenerateCodeCustom(secret, at, totp.ValidateOpts{Period: 30, Digits: 6})
@@ -58,8 +72,7 @@ func TestMFA_AlurLengkapSuperAdmin(t *testing.T) {
 
 	// Tahap empat: kode dari langkah berikutnya membuka jalan. Kode yang tadi
 	// dipakai mendaftar sudah hangus, itu memang perilaku yang diinginkan.
-	nanti := time.Now().Add(31 * time.Second)
-	if err := svc.VerifyMFA(ctx, userID, kode(t, enr.Secret, nanti)); err != nil {
+	if err := svc.VerifyMFA(ctx, userID, kode(t, enr.Secret, langkahBerikutnya(time.Now()))); err != nil {
 		t.Fatalf("verifikasi kode: %v", err)
 	}
 }
@@ -209,4 +222,40 @@ func TestMFA_TokenTantanganTerkunciTujuannya(t *testing.T) {
 	if _, err := signer.ParseAccess(ch); err == nil {
 		t.Fatal("token tantangan seharusnya tidak lolos sebagai token akses")
 	}
+}
+
+// TestLangkahBerikutnya_SelaluTepatSatuLangkah membuktikan perbaikan flake
+// secara menyeluruh, bukan dengan menjalankan uji berkali kali dan berharap.
+//
+// Seluruh tiga puluh posisi detik di dalam satu langkah diperiksa. Cara lama,
+// menambahkan tiga puluh satu detik, melompat dua langkah pada posisi detik
+// terakhir, dan kode dua langkah ke depan ditolak server karena di luar
+// toleransi satu langkah.
+func TestLangkahBerikutnya_SelaluTepatSatuLangkah(t *testing.T) {
+	const langkah = 30
+	// Awal sebuah langkah, dipilih agar perhitungannya mudah ditelusuri.
+	awal := time.Unix(1764547200, 0)
+
+	var caraLamaMelompat int
+	for offset := 0; offset < langkah; offset++ {
+		sekarang := awal.Add(time.Duration(offset) * time.Second)
+		langkahSekarang := sekarang.Unix() / langkah
+
+		if got := langkahBerikutnya(sekarang).Unix() / langkah; got != langkahSekarang+1 {
+			t.Fatalf("offset %ds: langkah %d, seharusnya %d",
+				offset, got, langkahSekarang+1)
+		}
+		if caraLama := sekarang.Add(31*time.Second).Unix() / langkah; caraLama != langkahSekarang+1 {
+			caraLamaMelompat++
+		}
+	}
+
+	// Menjaga agar penjelasan di atas tetap benar. Bila suatu saat tidak ada
+	// posisi yang membuat cara lama melompat, alasan perbaikan ini hilang dan
+	// komentarnya menyesatkan.
+	if caraLamaMelompat == 0 {
+		t.Fatal("cara lama ternyata tidak pernah melompat, penjelasan perbaikan ini perlu ditinjau")
+	}
+	t.Logf("cara lama melompat dua langkah pada %d dari %d posisi detik",
+		caraLamaMelompat, langkah)
 }
