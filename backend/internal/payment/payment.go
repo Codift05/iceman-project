@@ -38,6 +38,11 @@ var (
 	ErrReasonRequired   = errors.New("alasan wajib diisi")
 	ErrAmountMismatch   = errors.New("nominal pada webhook tidak sama dengan tagihan")
 	ErrInvalidStatus    = errors.New("perubahan status pembayaran tidak diizinkan")
+	// ErrFeeInvalid dipakai untuk koreksi biaya penyedia yang tidak masuk akal.
+	// Kesalahan yang paling sering adalah salah satuan: rupiah dimasukkan
+	// sebagai sen, sehingga biayanya menjadi seratus kali lebih besar dan
+	// melampaui nominal pembayaran.
+	ErrFeeInvalid = errors.New("biaya penyedia tidak sah")
 )
 
 // Payment adalah satu tagihan untuk sebuah pesanan.
