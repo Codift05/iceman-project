@@ -22,6 +22,7 @@ import (
 	"github.com/iceman/backend/internal/cart"
 	"github.com/iceman/backend/internal/catalog"
 	"github.com/iceman/backend/internal/customer"
+	"github.com/iceman/backend/internal/delivery"
 	"github.com/iceman/backend/internal/httpx"
 	"github.com/iceman/backend/internal/identity"
 	"github.com/iceman/backend/internal/order"
@@ -216,6 +217,41 @@ func main() {
 	secured.POST("/orders/:id/cancel", orderHandler.Cancel, izin("order.manage"))
 	secured.POST("/orders/:id/reschedule", orderHandler.Reschedule,
 		izin(order.ReschedulePermission()))
+
+	// Pengiriman: penugasan driver, modul driver, dan pelacakan posisi.
+	deliveries := delivery.NewDeliveries(pool)
+	deliveryHandler := delivery.NewHandler(deliveries)
+
+	secured.GET("/deliveries", deliveryHandler.List, izin("dispatch.manage"))
+	secured.GET("/deliveries/:id", deliveryHandler.Get, izin("order.view"))
+	secured.GET("/deliveries/:id/history", deliveryHandler.History, izin("order.view"))
+	secured.POST("/deliveries", deliveryHandler.Assign, izin("dispatch.manage"))
+	secured.PUT("/deliveries/:id/sequence", deliveryHandler.SetSequence,
+		izin("dispatch.manage"))
+
+	// Peta posisi driver. Izinnya dipisahkan dari pengelolaan dispatch karena
+	// posisi driver adalah data pribadi, dan yang boleh melihat peta belum
+	// tentu boleh mengatur penugasan.
+	secured.GET("/tracking/live", deliveryHandler.LiveMap, izin("tracking.view"))
+	secured.GET("/deliveries/:id/trail", deliveryHandler.Trail, izin("tracking.view"))
+
+	// Modul driver. Seluruh rute di bawah ini membaca driver dari token, bukan
+	// dari parameter, sehingga tidak ada cara meminta tugas orang lain.
+	drv := v1.Group("/driver", httpx.RequireAuth(parseToken))
+	drv.GET("/tasks", deliveryHandler.MyTasks, izin("delivery.view_own"))
+	drv.GET("/tasks/:id", deliveryHandler.MyTask, izin("delivery.view_own"))
+	drv.POST("/tasks/:id/status", deliveryHandler.ChangeStatus, izin("delivery.update_own"))
+	drv.POST("/tasks/:id/proof", deliveryHandler.SaveProof, izin("delivery.update_own"))
+	drv.POST("/tasks/:id/issues", deliveryHandler.ReportIssue, izin("delivery.update_own"))
+	drv.POST("/tasks/:id/positions", deliveryHandler.RecordPositions,
+		izin("delivery.update_own"))
+	drv.PUT("/tracking-consent", deliveryHandler.SetConsent, izin("delivery.update_own"))
+	drv.POST("/sync", deliveryHandler.Sync, izin("delivery.update_own"))
+
+	// Dua transisi terakhir pada matriks pengiriman dilakukan admin, bukan
+	// driver, sehingga endpointnya terpisah dengan izin yang berbeda.
+	secured.POST("/deliveries/:id/status", deliveryHandler.ChangeStatus,
+		izin("dispatch.manage"))
 
 	// Penelusuran jejak audit, hanya untuk peran yang berwenang.
 	auditReader := audit.NewReader(pool)
