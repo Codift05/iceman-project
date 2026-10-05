@@ -19,9 +19,15 @@ import (
 	"github.com/labstack/echo/v4/middleware"
 
 	"github.com/iceman/backend/internal/audit"
+	"github.com/iceman/backend/internal/cart"
+	"github.com/iceman/backend/internal/catalog"
+	"github.com/iceman/backend/internal/customer"
 	"github.com/iceman/backend/internal/httpx"
 	"github.com/iceman/backend/internal/identity"
+	"github.com/iceman/backend/internal/order"
+	"github.com/iceman/backend/internal/scheduling"
 	"github.com/iceman/backend/internal/store"
+	"github.com/iceman/backend/internal/worker"
 )
 
 func main() {
@@ -105,34 +111,111 @@ func main() {
 	secured := v1.Group("", httpx.RequireAuth(parseToken))
 	secured.GET("/me", identHandler.Me)
 
-	// Contoh endpoint berpagar izin. Peran tanpa depot.view ditolak 403.
-	secured.GET("/depots", func(c echo.Context) error {
-		rows, err := pool.Query(c.Request().Context(),
-			`SELECT id, code, name, latitude, longitude, service_radius_km, is_active
-			 FROM depots WHERE is_active ORDER BY code`)
-		if err != nil {
-			return httpx.Fail(c, "INTERNAL")
-		}
-		defer rows.Close()
+	// Penjadwalan: depo, area layanan, dan slot pengiriman.
+	sched := scheduling.NewHandler(
+		scheduling.NewDepots(pool),
+		scheduling.NewAreas(pool),
+		scheduling.NewSlots(pool),
+	)
 
-		out := []map[string]any{}
-		for rows.Next() {
-			var (
-				id, code, name string
-				lat, lng, rad  float64
-				active         bool
-			)
-			if err := rows.Scan(&id, &code, &name, &lat, &lng, &rad, &active); err != nil {
-				return httpx.Fail(c, "INTERNAL")
-			}
-			out = append(out, map[string]any{
-				"id": id, "code": code, "name": name,
-				"latitude": lat, "longitude": lng,
-				"service_radius_km": rad, "is_active": active,
-			})
-		}
-		return c.JSON(http.StatusOK, map[string]any{"depots": out})
-	}, httpx.RequirePermission(checkPermission, "depot.view", recordDenial))
+	// Endpoint terbuka, dipakai aplikasi pelanggan sebelum masuk untuk
+	// memeriksa jangkauan layanan dan melihat jadwal yang tersedia. Hanya
+	// berisi data yang memang perlu diketahui calon pelanggan.
+	pub := v1.Group("/public")
+	pub.GET("/depots/nearest", sched.NearestDepot)
+	pub.GET("/areas/:id/availability", sched.Availability)
+	pub.GET("/areas/:id/slots/next", sched.NextAvailable)
+
+	izin := func(permission string) echo.MiddlewareFunc {
+		return httpx.RequirePermission(checkPermission, permission, recordDenial)
+	}
+
+	secured.GET("/depots", sched.ListDepots, izin("depot.view"))
+	secured.GET("/depots/:id", sched.GetDepot, izin("depot.view"))
+	secured.POST("/depots", sched.CreateDepot, izin("depot.manage"))
+	secured.PATCH("/depots/:id", sched.UpdateDepot, izin("depot.manage"))
+
+	secured.GET("/areas", sched.ListAreas, izin("area_slot.view"))
+	secured.POST("/areas", sched.CreateArea, izin("area_slot.manage"))
+	secured.PATCH("/areas/:id", sched.UpdateArea, izin("area_slot.manage"))
+
+	secured.GET("/areas/:id/slots", sched.ListSlots, izin("area_slot.view"))
+	secured.POST("/slots", sched.CreateSlot, izin("area_slot.manage"))
+	secured.PATCH("/slots/:id/capacity", sched.SetSlotCapacity, izin("area_slot.manage"))
+	secured.PATCH("/slots/:id/holiday", sched.SetSlotHoliday, izin("area_slot.manage"))
+
+	// Katalog, pelanggan, keranjang, dan pesanan.
+	//
+	// Antrean job dipakai checkout untuk mengantre pembuatan tagihan dalam
+	// transaksi yang sama (AD-03). Bila antreannya gagal disiapkan, server
+	// tetap jalan namun pesanan baru tidak akan punya tagihan, jadi itu
+	// dicatat sebagai peringatan yang menonjol.
+	queue, err := worker.NewClient(pool)
+	if err != nil {
+		log.Error("klien antrean gagal disiapkan, pembuatan tagihan tidak akan diantre",
+			"error", err)
+	}
+
+	products := catalog.NewProducts(pool)
+	customers := customer.NewCustomers(pool)
+	carts := cart.NewCarts(pool, products)
+	slots := scheduling.NewSlots(pool)
+	orders := order.NewOrders(order.Deps{
+		Pool: pool, Carts: carts, Customers: customers, Slots: slots, Queue: queue,
+	})
+
+	catalogHandler := catalog.NewHandler(products)
+	customerHandler := customer.NewHandler(customers)
+	orderHandler := order.NewHandler(orders, carts)
+
+	// Katalog pelanggan terbuka tanpa token, seperti endpoint publik lain:
+	// calon pelanggan perlu melihat produk dan harganya sebelum masuk.
+	pub.GET("/products", catalogHandler.Catalog)
+
+	secured.GET("/products", catalogHandler.List, izin("product.view"))
+	secured.GET("/products/:id", catalogHandler.Get, izin("product.view"))
+	secured.POST("/products", catalogHandler.Create, izin("product.manage"))
+	secured.PATCH("/products/:id", catalogHandler.Update, izin("product.manage"))
+	secured.PUT("/products/:id/contract-price", catalogHandler.SetContractPrice,
+		izin("product.manage"))
+
+	secured.GET("/customers", customerHandler.List, izin("customer.view"))
+	secured.GET("/customers/:id", customerHandler.Get, izin("customer.view"))
+	secured.POST("/customers", customerHandler.Create, izin("customer.manage"))
+	secured.PATCH("/customers/:id", customerHandler.Update, izin("customer.manage"))
+	secured.GET("/customers/:id/addresses", customerHandler.ListAddresses,
+		izin("customer.view"))
+	secured.POST("/customers/:id/addresses", customerHandler.AddAddress,
+		izin("customer.manage"))
+	secured.PUT("/customers/:id/addresses/:addressID/primary",
+		customerHandler.SetPrimaryAddress, izin("customer.manage"))
+	secured.DELETE("/customers/:id/addresses/:addressID",
+		customerHandler.DeactivateAddress, izin("customer.manage"))
+
+	// Termin kontrak menentukan apakah pesanan boleh melewati pembayaran di
+	// muka, sehingga izinnya dipisahkan dari pengelolaan pelanggan biasa.
+	secured.PUT("/customers/:id/contract-term", customerHandler.SetContractTerm,
+		izin("customer.manage_terms"))
+
+	// Keranjang pelanggan dikelola admin, untuk pesanan yang masuk lewat
+	// telepon. Endpoint pelanggan sendiri menunggu keputusan OQ-002 tentang
+	// cara pelanggan masuk.
+	secured.GET("/customers/:id/cart", orderHandler.GetCart, izin("order.create_manual"))
+	secured.POST("/customers/:id/cart/items", orderHandler.AddToCart,
+		izin("order.create_manual"))
+	secured.PUT("/customers/:id/cart/items/:productID", orderHandler.SetCartQty,
+		izin("order.create_manual"))
+	secured.POST("/customers/:id/orders/:orderID/reorder", orderHandler.Reorder,
+		izin("order.create_manual"))
+
+	secured.GET("/orders", orderHandler.List, izin("order.view"))
+	secured.GET("/orders/:id", orderHandler.Get, izin("order.view"))
+	secured.GET("/orders/:id/history", orderHandler.History, izin("order.view"))
+	secured.POST("/orders", orderHandler.Checkout, izin("order.create_manual"))
+	secured.POST("/orders/:id/status", orderHandler.ChangeStatus, izin("order.manage"))
+	secured.POST("/orders/:id/cancel", orderHandler.Cancel, izin("order.manage"))
+	secured.POST("/orders/:id/reschedule", orderHandler.Reschedule,
+		izin(order.ReschedulePermission()))
 
 	// Penelusuran jejak audit, hanya untuk peran yang berwenang.
 	auditReader := audit.NewReader(pool)
