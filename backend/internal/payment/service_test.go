@@ -635,3 +635,18 @@ func (l *lingkungan) buatAdmin(t *testing.T) uuid.UUID {
 func sebagai(userID uuid.UUID) context.Context {
 	return audit.WithActor(context.Background(), userID)
 }
+
+// jumlahPenolakan menghitung catatan penolakan webhook.
+func (l *lingkungan) jumlahPenolakan(t *testing.T) int {
+	t.Helper()
+	var n int
+	if err := l.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM payment_webhook_rejects`).Scan(&n); err != nil {
+		t.Fatalf("menghitung penolakan: %v", err)
+	}
+	return n
+}
+
+// nominalRupiah mengubah sen menjadi rupiah bulat, bentuk yang dipakai
+// penyedia pembayaran Indonesia pada muatan webhooknya.
+func nominalRupiah(sen int64) int64 { return sen / 100 }
