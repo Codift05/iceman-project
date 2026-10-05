@@ -20,6 +20,7 @@ help:
 	@echo "fresh     hapus basis data uji lalu uji ulang dari nol"
 	@echo "seed      buat pengguna pengembangan, contoh:"
 	@echo "          make seed ROLE=ADMIN_OPS EMAIL=ops@iceman.test PASSWORD=rahasia"
+	@echo "          peran DRIVER wajib menyertakan DEPOT, misalnya DEPOT=MDO-01"
 
 up:
 	$(COMPOSE) up -d
@@ -61,7 +62,7 @@ race:
 	ICEMAN_TEST_DSN="$(TEST_DSN)" go test ./... -race -count=1 -p 1
 
 seed:
-	go run ./cmd/seed -role "$(ROLE)" -email "$(EMAIL)" -password "$(PASSWORD)"
+	go run ./cmd/seed -role "$(ROLE)" -email "$(EMAIL)" -password "$(PASSWORD)" -depot "$(DEPOT)"
 
 lint:
 	go vet ./...
