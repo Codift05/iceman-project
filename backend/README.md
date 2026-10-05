@@ -28,6 +28,7 @@ internal/customer   pelanggan, alamat pengiriman, dan termin kontrak
 internal/cart       keranjang di sisi server
 internal/order      checkout, transisi status, dan pesan ulang
 internal/delivery   penugasan driver, modul driver, dan pelacakan posisi
+internal/payment    tagihan, webhook penyedia, dan refund
 internal/identity   kata sandi, token, faktor kedua, dan hak akses
 internal/worker     job latar di atas antrean River
 internal/audit      jejak audit yang ikut transaksi pemanggil
@@ -68,6 +69,8 @@ db/migrations       migrasi goose, ditanam ke dalam binary
   kendala, dan sinkronisasi perintah yang dibuat tanpa jaringan.
 - Pelacakan posisi driver dengan persetujuan, partisi bulanan, dan pembersihan
   masa simpan lewat pelepasan partisi.
+- Tagihan pembayaran, webhook penyedia yang idempoten dan berverifikasi tanda
+  tangan, pemetaan status penyedia, serta refund penuh maupun sebagian.
 - Bentuk galat seragam dan pengenal permintaan.
 - Server HTTP dengan endpoint kesehatan dan mematikan diri dengan rapi.
 
@@ -108,6 +111,11 @@ Uji pada `internal/scheduling` adalah inti pembuktian rancangan, bukan pelengkap
 | `TestPosisi_KirimUlangTidakMenggandakan` | kunci alami posisi membuat kiriman ulang idempoten |
 | `TestPosisi_TanpaPersetujuanDitolak` | SEC-012, perekaman butuh persetujuan driver |
 | `TestMasaSimpanPosisi_MenyiapkanDanMelepasPartisi` | SRS-TRK-004, pembersihan lewat pelepasan partisi |
+| `TestRefund_BersamaanTidakMelebihiPembayaran` | delapan refund bersamaan tidak melebihi yang pernah masuk |
+| `TestHandlerWebhook_TandaTanganSalahDitolakDanTercatat` | webhook palsu ditolak dan percobaannya tercatat |
+| `TestWebhook_EventSamaDuaKaliSatuCatatan` | DB-02, event kembar hanya tercatat sekali |
+| `TestWebhook_NominalTidakCocokTidakMelunasi` | pesanan hanya lunas bila nominalnya sama dengan tagihan |
+| `TestPemetaanStatus_DiujiBukanHanyaDidokumentasikan` | SRS-PAY-003, seluruh entri pemetaan diperiksa |
 
 Dua uji pembanding terakhir sengaja dipertahankan. Bila suatu saat ada yang
 mengusulkan menghapus `FOR UPDATE` demi kecepatan, jalankan keduanya lebih
@@ -135,6 +143,12 @@ lama sama sama berhasil mengubah tugas orang.
 `TestSync_DiprosesMenurutWaktuPerangkat`, bila pengurutan menurut waktu
 perangkat dilepas, gagal dengan pesan "ASSIGNED ke ARRIVED tidak diizinkan"
 karena perintah diproses mengikuti urutan kedatangan.
+
+`TestRefund_BersamaanTidakMelebihiPembayaran`, bila penjumlahan refund
+terdahulu dimasukkan kembali ke dalam pernyataan yang mengunci baris
+pembayaran, delapan dari delapan refund lolos dan uang yang dikembalikan
+menjadi empat kali yang pernah masuk. Penjelasannya ada pada bagian
+pembayaran.
 
 ## Port yang dipakai
 
@@ -332,9 +346,15 @@ Promo belum diterapkan. SRS-CAT-003 berstatus Should Have dan diskon tetap nol
 sampai aturannya diputuskan, namun nilainya sudah dihitung di jalur checkout
 sehingga DB-08 tetap memeriksa konsistensi total.
 
-Penyedia pembayaran belum disambungkan. Job pembuatan tagihan sudah diantre
-dalam transaksi yang sama dengan pesanan, tinggal mengisi pemanggilan
-penyedianya.
+Penyedia pembayaran belum dipilih. Seluruh domain pembayaran sudah berjalan di
+atas penyedia manual, dan menyambungkan penyedia sungguhan berarti menulis satu
+implementasi antarmuka Provider beserta nilai penyetelan verifikasi tanda
+tangannya.
+
+Rekonsiliasi belum dikerjakan. Tabel settlement sudah ada beserta kekangan yang
+memeriksa konsistensi gross, biaya, dan net, namun pemasukan berkas settlement
+dan laporan selisihnya (SRS-PAY-005) belum. Itu bagian Must Have yang tersisa
+pada domain pembayaran.
 
 Pengelolaan pengguna internal belum punya endpoint. Membuat driver beserta
 deponya untuk sekarang lewat `make seed ROLE=DRIVER DEPOT=MDO-01`. Driver wajib
@@ -438,3 +458,76 @@ Driver yang posisinya tidak diperbarui lebih dari lima belas menit ditandai
 tidak terpantau, bukan ditampilkan pada posisi usang. Menampilkan posisi lama
 seolah terkini membuat admin menelepon driver yang disangka berhenti, padahal
 yang hilang hanya sinyalnya.
+
+## Pembayaran
+
+Penyedia pembayaran belum dipilih, sehingga seluruh aturan pada domain ini
+dibuat tidak bergantung padanya: status penyedia dipetakan ke status internal,
+tanda tangan diverifikasi lewat antarmuka, dan pembuatan tagihan memanggil
+antarmuka penyedia. Yang menunggu keputusan hanya satu implementasi antarmuka.
+
+Penyedia bawaan sekarang adalah penyedia manual: tagihan dicatat dan
+pembayarannya dikonfirmasi admin. Itu bukan penyangga kosong, karena sebagian
+pelanggan Iceman membayar lewat transfer dan tunai, sehingga jalur ini tetap
+dipakai setelah QRIS aktif.
+
+### Webhook
+
+Urutannya tidak boleh ditukar: badan dibaca, tanda tangan diverifikasi, baru
+muatannya dipercaya. Handler menjawab cepat dan menyerahkan pemrosesan kepada
+pekerja latar, karena penyedia memberi batas waktu beberapa detik dan mengirim
+ulang bila terlampaui. Pesanan berpindah ke `PAID` hanya setelah pekerja
+selesai, dan ada ujinya.
+
+Webhook ditolak seluruhnya bila kunci verifikasi belum disetel. Menerima
+berarti siapa pun yang tahu alamatnya dapat menyatakan pesanan sudah dibayar.
+Kuncinya diisi lewat `PAYMENT_WEBHOOK_SECRET`; nama header, algoritma, dan
+awalan juga dapat disetel karena berbeda antar penyedia.
+
+Perbandingan tanda tangan memakai `hmac.Equal`. Perbandingan string biasa
+berhenti pada ketidaksamaan pertama, sehingga lamanya membocorkan tanda tangan
+yang benar sedikit demi sedikit kepada penyerang yang mengukur waktu jawaban.
+
+Tiga keadaan menandai event untuk ditinjau manusia, dan ketiganya menyangkut
+uang: pembayarannya tidak ditemukan, status penyedianya belum dikenal, atau
+nominalnya tidak sama dengan tagihan. Semuanya dicatat, bukan ditolak, karena
+event yang ditolak hilang dan tidak dapat ditelusuri ketika nanti ada selisih
+dengan penyedia.
+
+```
+GET /v1/payments/events/review
+```
+
+Tagihan kedaluwarsa tidak melunasi pesanan walau penyedia menyatakan
+pembayarannya berhasil, karena kuota slot pesanan mungkin sudah dilepaskan.
+Uangnya nyata, jadi eventnya ditandai untuk ditinjau agar seseorang memutuskan
+antara mengembalikan dana atau menghormati pesanan secara manual.
+
+### Satu bug yang perlu diingat
+
+Refund mengunci baris pembayaran, lalu menghitung refund terdahulu dalam
+pernyataan tersendiri. Pemisahan itu syarat kebenaran, bukan kerapian.
+
+Bila penjumlahannya ikut di dalam pernyataan yang mengunci, ia dievaluasi
+memakai snapshot awal pernyataan tersebut. Transaksi yang menunggu kunci tetap
+memakai snapshot lama itu dan tidak melihat refund yang baru di-commit
+transaksi pemegang kunci, sehingga sisanya terbaca masih utuh. Akibatnya
+delapan refund bersamaan semuanya lolos, dan uang yang dikembalikan menjadi
+empat kali yang pernah masuk.
+
+Pada `READ COMMITTED` setiap pernyataan baru mengambil snapshot baru. Jangan
+satukan kembali keduanya demi menghemat satu perjalanan ke basis data.
+
+| Endpoint | Izin |
+|---|---|
+| `POST /v1/webhooks/payment` | terbuka, dijaga tanda tangan |
+| `GET /v1/payments` | `payment.view` |
+| `GET /v1/payments/:id` | `payment.view` |
+| `POST /v1/orders/:id/payments` | `payment.manage` |
+| `GET /v1/orders/:id/payments` | `payment.view` |
+| `POST /v1/payments/:id/refund` | `refund.process` |
+| `GET /v1/payments/events/review` | `payment.manage` |
+
+Izin refund dipisahkan dari pengelolaan pembayaran, karena mengembalikan dana
+memindahkan uang keluar dan tidak setiap peran yang boleh melihat atau membuat
+tagihan boleh melakukannya.
