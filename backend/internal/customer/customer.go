@@ -30,13 +30,32 @@ var (
 	ErrAreaInactive    = errors.New("wilayah layanan tidak aktif")
 	ErrCoordRange      = errors.New("koordinat di luar rentang yang sah")
 	ErrTermInvalid     = errors.New("termin pembayaran tidak sah")
+	ErrTypeUnknown     = errors.New("jenis pelanggan tidak dikenali")
+	// ErrCreditLimit muncul bila pesanan baru membuat piutang pelanggan
+	// melampaui plafonnya (SRS-ADM-002).
+	ErrCreditLimit = errors.New("pesanan melampaui batas kredit pelanggan")
 )
 
-// Jenis pelanggan.
+// Jenis pelanggan (SRS-ADM-002).
+//
+// Bisnis berbeda dari kontrak: ia pelanggan usaha yang membeli dalam jumlah
+// besar namun tetap membayar di muka, sedangkan kontrak membayar belakangan
+// dengan termin. Harga khusus dapat diberikan kepada keduanya, namun hanya
+// kontrak yang boleh punya termin.
 const (
 	TypeRetail   = "RETAIL"
+	TypeBusiness = "BUSINESS"
 	TypeContract = "CONTRACT"
 )
+
+// ValidType menjawab apakah sebuah nilai adalah jenis pelanggan yang dikenali.
+func ValidType(t string) bool {
+	switch t {
+	case TypeRetail, TypeBusiness, TypeContract:
+		return true
+	}
+	return false
+}
 
 // Customer adalah satu pelanggan Iceman.
 type Customer struct {
@@ -152,8 +171,8 @@ func (c *Customers) Create(ctx context.Context, in Input) (*Customer, error) {
 	if jenis == "" {
 		jenis = TypeRetail
 	}
-	if jenis != TypeRetail && jenis != TypeContract {
-		return nil, fmt.Errorf("jenis pelanggan %q tidak dikenali", in.Type)
+	if !ValidType(jenis) {
+		return nil, fmt.Errorf("%w: %s", ErrTypeUnknown, in.Type)
 	}
 
 	tx, err := c.pool.Begin(ctx)
@@ -216,8 +235,8 @@ func (c *Customers) Update(ctx context.Context, id uuid.UUID, in Input) (*Custom
 
 	jenis := before.Type
 	if in.Type != "" {
-		if in.Type != TypeRetail && in.Type != TypeContract {
-			return nil, fmt.Errorf("jenis pelanggan %q tidak dikenali", in.Type)
+		if !ValidType(in.Type) {
+			return nil, fmt.Errorf("%w: %s", ErrTypeUnknown, in.Type)
 		}
 		jenis = in.Type
 	}

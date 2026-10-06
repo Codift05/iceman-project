@@ -229,8 +229,11 @@ func codeFor(err error) string {
 		return "PHONE_ALREADY_EXISTS"
 	case errors.Is(err, ErrAreaInactive):
 		return "AREA_NOT_SERVED"
+	case errors.Is(err, ErrCreditLimit):
+		return "CREDIT_LIMIT_EXCEEDED"
 	case errors.Is(err, ErrPhoneRequired), errors.Is(err, ErrNameRequired),
-		errors.Is(err, ErrCoordRange), errors.Is(err, ErrTermInvalid):
+		errors.Is(err, ErrCoordRange), errors.Is(err, ErrTermInvalid),
+		errors.Is(err, ErrTypeUnknown):
 		return "VALIDATION_FAILED"
 	default:
 		return "INTERNAL"
@@ -249,9 +252,28 @@ func detailFor(err error) []httpx.Detail {
 		return []httpx.Detail{{Field: "latitude", Message: "Koordinat di luar rentang yang sah."}}
 	case errors.Is(err, ErrTermInvalid):
 		return []httpx.Detail{{Field: "payment_term_days", Message: "Termin pembayaran tidak sah."}}
+	case errors.Is(err, ErrTypeUnknown):
+		return []httpx.Detail{{Field: "type",
+			Message: "Jenis pelanggan harus RETAIL, BUSINESS, atau CONTRACT."}}
 	case errors.Is(err, ErrAreaInactive):
 		return []httpx.Detail{{Field: "service_area_id", Message: "Wilayah layanan ini tidak aktif."}}
 	default:
 		return nil
 	}
+}
+
+// Credit mengembalikan keadaan piutang seorang pelanggan.
+//
+// Dipakai tampilan admin agar petugas dapat melihat sisa plafon sebelum
+// menerima pesanan lewat telepon, bukan menunggu penolakan saat menyimpannya.
+func (h *Handler) Credit(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.Fail(c, "NOT_FOUND")
+	}
+	out, err := h.customers.Credit(c.Request().Context(), id)
+	if err != nil {
+		return httpx.Fail(c, codeFor(err), detailFor(err)...)
+	}
+	return c.JSON(http.StatusOK, out)
 }

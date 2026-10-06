@@ -402,6 +402,8 @@ func codeFor(err error) string {
 		return "NOT_FOUND"
 	case errors.Is(err, customer.ErrAreaInactive):
 		return "AREA_NOT_SERVED"
+	case errors.Is(err, customer.ErrCreditLimit):
+		return "CREDIT_LIMIT_EXCEEDED"
 
 	case errors.Is(err, catalog.ErrProductNotFound):
 		return "PRODUCT_NOT_FOUND"
@@ -432,6 +434,8 @@ func detailFor(err error) []httpx.Detail {
 		return []httpx.Detail{{Field: "slot_id", Message: "Jadwal ini tidak melayani alamat tersebut."}}
 	case errors.Is(err, cart.ErrQtyNegative):
 		return []httpx.Detail{{Field: "qty", Message: "Jumlah tidak boleh negatif."}}
+	case errors.Is(err, customer.ErrCreditLimit):
+		return []httpx.Detail{{Field: "customer_id", Message: err.Error()}}
 	default:
 		return nil
 	}

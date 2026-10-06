@@ -179,6 +179,18 @@ func (o *Orders) Checkout(ctx context.Context, in CheckoutInput) (*Order, error)
 	}
 	defer tx.Rollback(ctx)
 
+	// Batas kredit diperiksa di dalam transaksi, dengan baris termin terkunci
+	// (SRS-ADM-002). Tanpa penguncian, dua pesanan bersamaan dapat sama sama
+	// membaca piutang yang sama lalu keduanya merasa cukup.
+	//
+	// Diperiksa sebelum kuota slot diambil, supaya pesanan yang ditolak karena
+	// plafon tidak sempat menahan kuota yang dapat dipakai pelanggan lain.
+	if bayarBelakangan {
+		if err := o.d.Customers.CheckCreditTx(ctx, tx, in.CustomerID, total); err != nil {
+			return nil, err
+		}
+	}
+
 	// Mengunci dan mengambil kuota slot. Fungsi ini yang memeriksa hari libur,
 	// batas pemesanan, dan sisa kuota, memakai SELECT FOR UPDATE.
 	if _, err := scheduling.Reserve(ctx, tx, in.SlotID, now); err != nil {
