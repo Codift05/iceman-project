@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/iceman/backend/internal/audit"
+	"github.com/iceman/backend/internal/notify"
 	"github.com/iceman/backend/internal/order"
 )
 
@@ -29,6 +30,9 @@ type Deps struct {
 	Provider Provider
 	// Expiry mengatur masa berlaku tagihan. Nol berarti DefaultExpiry.
 	Expiry time.Duration
+	// Notifier boleh kosong. Bila kosong, notifikasi tidak diantre dan
+	// pemrosesan pembayaran tetap berhasil, sesuai BR-010.
+	Notifier *notify.Service
 }
 
 // Service menangani pembayaran.

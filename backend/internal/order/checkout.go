@@ -16,6 +16,7 @@ import (
 	"github.com/iceman/backend/internal/audit"
 	"github.com/iceman/backend/internal/cart"
 	"github.com/iceman/backend/internal/customer"
+	"github.com/iceman/backend/internal/notify"
 	"github.com/iceman/backend/internal/scheduling"
 	"github.com/iceman/backend/internal/worker"
 )
@@ -29,6 +30,10 @@ type Deps struct {
 	// ternyata penuh. Boleh kosong; tanpa itu penolakan tetap terjadi, hanya
 	// tanpa tawaran penggantinya.
 	Slots *scheduling.Slots
+	// Notifier boleh kosong. Bila kosong, notifikasi tidak diantre dan
+	// perubahan status tetap berhasil, sesuai BR-010: kegagalan layanan pihak
+	// ketiga yang tidak kritis tidak boleh menggagalkan transaksi inti.
+	Notifier *notify.Service
 	// Queue boleh kosong. Bila kosong, job susulan tidak diantre dan
 	// pembuatan pesanan tetap berhasil. Itu dipakai uji yang tidak
 	// memerlukan antrean, bukan keadaan produksi.

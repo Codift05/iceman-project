@@ -17,8 +17,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
+	"github.com/iceman/backend/internal/notify"
 	"github.com/iceman/backend/internal/order"
 	"github.com/iceman/backend/internal/payment"
 	"github.com/iceman/backend/internal/store"
@@ -84,11 +86,22 @@ func main() {
 	// Layanan pembayaran disambungkan lewat penyambung, bukan diserahkan
 	// langsung, karena paket pekerja tidak boleh mengimpor paket pembayaran:
 	// paket pesanan sudah mengimpor pekerja, dan pembayaran mengimpor pesanan.
-	pay := payment.NewService(payment.Deps{Pool: pool, Provider: payment.ManualProvider{}})
+	// Notifikasi dipakai pekerja untuk mengirim, dan dipakai pembayaran untuk
+	// mengantre notifikasi pembayaran diterima. Penyambung antreannya memakai
+	// klien pekerja itu sendiri, sehingga diisi setelah kliennya dibuat.
+	notifier := notify.NewService(notify.Deps{
+		Pool:     pool,
+		Channels: notify.NewRegistry(notify.LogChannel{Log: log}),
+	})
+	pay := payment.NewService(payment.Deps{
+		Pool: pool, Provider: payment.ManualProvider{}, Notifier: notifier,
+	})
 
 	maxWorkers := envInt("WORKER_CONCURRENCY", 5)
 	client, err := worker.NewWorker(worker.Deps{
-		Pool: pool, Log: log, Payments: paymentAdapter{svc: pay},
+		Pool: pool, Log: log,
+		Payments:      paymentAdapter{svc: pay},
+		Notifications: notifier,
 	}, worker.Options{
 		Queues: map[string]river.QueueConfig{
 			river.QueueDefault: {MaxWorkers: maxWorkers},
@@ -99,6 +112,11 @@ func main() {
 		log.Error("membuat pekerja gagal", "error", err)
 		os.Exit(1)
 	}
+
+	// Penyambung antrean notifikasi dipasang setelah klien ada. Pekerja juga
+	// mengantre notifikasi, misalnya ketika memproses pembayaran, dan tanpa
+	// penyambung ini notifikasinya hanya tercatat menunggu.
+	notifier.SetEnqueuer(notifyEnqueuer{queue: client})
 
 	if err := client.Start(ctx); err != nil {
 		log.Error("pekerja gagal dijalankan", "error", err)
@@ -129,4 +147,19 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// notifyEnqueuer menyambungkan domain notifikasi dengan antrean job.
+//
+// Sama seperti pada proses API, diletakkan di sini agar paket notifikasi tidak
+// mengimpor paket pekerja.
+type notifyEnqueuer struct{ queue *river.Client[pgx.Tx] }
+
+// EnqueueSendTx mengantre pengiriman satu notifikasi.
+func (n notifyEnqueuer) EnqueueSendTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
+	if n.queue == nil {
+		return nil
+	}
+	_, err := n.queue.InsertTx(ctx, tx, worker.SendNotificationArgs{NotificationID: id}, nil)
+	return err
 }

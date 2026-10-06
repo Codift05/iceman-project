@@ -13,13 +13,32 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/iceman/backend/internal/notify"
 )
 
+// Deps adalah apa yang dibutuhkan pengelola pengiriman.
+//
+// Berbentuk struct, seperti pada pesanan dan pembayaran, supaya penambahan
+// kebutuhan baru tidak mengubah tanda tangan konstruktornya dan memaksa
+// seluruh pemanggil disunting.
+type Deps struct {
+	Pool *pgxpool.Pool
+	// Notifier boleh kosong. Bila kosong, notifikasi tidak diantre dan
+	// perubahan status pengiriman tetap berhasil, sesuai BR-010.
+	Notifier *notify.Service
+}
+
 // Deliveries menangani penugasan dan pengelolaan pengiriman.
-type Deliveries struct{ pool *pgxpool.Pool }
+type Deliveries struct {
+	pool     *pgxpool.Pool
+	notifier *notify.Service
+}
 
 // NewDeliveries membuat pengelola pengiriman.
-func NewDeliveries(pool *pgxpool.Pool) *Deliveries { return &Deliveries{pool: pool} }
+func NewDeliveries(d Deps) *Deliveries {
+	return &Deliveries{pool: d.Pool, notifier: d.Notifier}
+}
 
 // Status pengiriman (SRS Bab 5.3).
 const (

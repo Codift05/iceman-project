@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/iceman/backend/internal/audit"
+	"github.com/iceman/backend/internal/notify"
 	"github.com/iceman/backend/internal/order"
 )
 
@@ -164,6 +165,16 @@ func (s *Service) ApplyEvent(ctx context.Context, eventRowID uuid.UUID) (*ApplyR
 
 	if err := ikutkanPesanan(ctx, tx, orderID, tujuan, catatanPesanan(tujuan)); err != nil {
 		return nil, err
+	}
+
+	// Notifikasi pembayaran diterima diantre dalam transaksi yang sama. Inilah
+	// efek samping "Antre notifikasi" pada perpindahan WAITING_PAYMENT ke PAID
+	// di tabel transisi SRS Bab 5.1.
+	if tujuan == StatusSuccess && s.d.Notifier != nil {
+		if err := s.d.Notifier.EmitForOrderTx(ctx, tx,
+			notify.EventOrderPaid, orderID, ""); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := tandaiSelesai(ctx, tx, eventRowID); err != nil {

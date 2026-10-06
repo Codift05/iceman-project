@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/iceman/backend/internal/audit"
+	"github.com/iceman/backend/internal/notify"
 	"github.com/iceman/backend/internal/scheduling"
 )
 
@@ -99,6 +100,16 @@ func (o *Orders) ChangeStatus(ctx context.Context, orderID uuid.UUID, to string,
 		Detail: rinciTransisi(t, alasan),
 	}); err != nil {
 		return nil, err
+	}
+
+	// Notifikasi diantre dalam transaksi yang sama, sehingga tidak mungkin ada
+	// pemberitahuan tentang perpindahan yang ternyata batal. Inilah efek
+	// samping "Antre notifikasi" pada tabel transisi SRS Bab 5.1.
+	if event := notifyEvent(to); event != "" && o.d.Notifier != nil {
+		if err := o.d.Notifier.EmitForOrderTx(ctx, tx, event, orderID,
+			alasanUntukPelanggan(to, alasan)); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -235,4 +246,30 @@ func alasanTambahan(alasan string) string {
 		return ""
 	}
 	return ", alasan: " + alasan
+}
+
+// notifyEvent memetakan status pesanan ke event notifikasi.
+//
+// Hanya status yang berarti bagi pelanggan yang memicu notifikasi. Perpindahan
+// seperti PAID ke PROCESSING adalah urusan internal, dan memberitahukannya
+// hanya membuat pelanggan menerima pesan yang tidak menuntut tindakan apa pun.
+func notifyEvent(status string) string {
+	switch status {
+	case StatusCancelled:
+		return notify.EventOrderCancelled
+	default:
+		return ""
+	}
+}
+
+// alasanUntukPelanggan memilih alasan yang layak disampaikan kepada pelanggan.
+//
+// Alasan pembatalan disampaikan karena pelanggan berhak tahu sebabnya, dan
+// tanpa itu ia akan menelepon untuk menanyakannya. Alasan pada perpindahan
+// lain adalah catatan internal dan tidak diteruskan.
+func alasanUntukPelanggan(status, alasan string) string {
+	if status == StatusCancelled && alasan != "" {
+		return "Alasan: " + alasan + "."
+	}
+	return ""
 }
