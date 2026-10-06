@@ -76,6 +76,11 @@ db/migrations       migrasi goose, ditanam ke dalam binary
   penandaan tindak lanjut, koreksi biaya yang teraudit, dan ekspor CSV.
 - Notifikasi event pesanan, pembayaran, dan pengiriman, diantre dalam
   transaksi yang sama dengan perubahan yang memicunya.
+- Jenis pelanggan ritel, bisnis, dan kontrak.
+- Batas kredit pelanggan kontrak yang benar benar diperiksa saat checkout,
+  bukan hanya tercatat.
+- Dashboard admin: indikator operasional dan keuangan dalam satu halaman,
+  dengan angka keuangan disaring menurut kewenangan pembacanya.
 - Bentuk galat seragam dan pengenal permintaan.
 - Server HTTP dengan endpoint kesehatan dan mematikan diri dengan rapi.
 
@@ -660,3 +665,106 @@ diperbaiki bila cara penamaannya berubah.
 | `GET /v1/notifications` | `settings.view` |
 | `GET /v1/notifications/settings` | `settings.view` |
 | `PUT /v1/notifications/settings` | `settings.manage` |
+
+## Dashboard admin dan batas kredit
+
+### Satu halaman, dua tingkat kewenangan
+
+Dashboard memuat dua belas indikator: enam operasional dan enam keuangan.
+Keduanya diminta lewat satu endpoint, `GET /v1/dashboard`, dan jawabannya
+menyertakan `includes_finance` agar klien tahu apakah bagian keuangan ikut.
+
+Penyaringannya terjadi di dalam layanan, bukan di lapisan HTTP. Layanan
+menerima `withFinance` dan tidak menjalankan query keuangan sama sekali bila
+nilainya salah, sehingga angka keuangan tidak mungkin ikut terkirim karena ada
+yang lupa menyaring satu kolom di handler.
+
+Yang tidak berwenang atas angka keuangan menerima HTTP 200 tanpa bagian itu,
+bukan 403. Menolak seluruh halaman karena satu bagiannya di luar kewenangan
+akan membuat Admin Operasional tidak dapat melihat apa pun, padahal enam
+indikator operasional memang haknya.
+
+`GET /v1/dashboard/definitions` memaparkan arti setiap indikator beserta
+penanda apakah ia tergolong keuangan. Definisinya ikut dikirim karena angka
+seperti "terlambat" dan "pesanan baru" punya lebih dari satu tafsiran yang
+masuk akal, dan klien tidak seharusnya menebaknya.
+
+### Izinnya "salah satu dari", bukan satu
+
+Matriks peran memecah kewenangan laporan menurut isinya:
+
+| Peran       | Izin laporan yang dipegang                                   | Dashboard | Bagian keuangan |
+| ----------- | ------------------------------------------------------------ | --------- | --------------- |
+| SUPER_ADMIN | view_operational, view_financial, view_summary, export       | ya        | ya              |
+| ADMIN_OPS   | view_operational, export                                     | ya        | tidak           |
+| FINANCE     | view_financial, export                                       | ya        | ya              |
+| MANAGEMENT  | view_operational, view_financial, view_summary               | ya        | ya              |
+| DRIVER      | tidak ada                                                    | tidak     | tidak           |
+
+Karena itu rutenya dipagari `httpx.RequireAnyPermission`: cukup satu izin
+laporan untuk membuka halaman. Dashboard pernah dipagari `report.view_summary`
+saja, dan akibatnya Admin Operasional serta Keuangan menerima 403 pada halaman
+yang justru mereka buka setiap hari. Uji handler tidak menangkapnya karena di
+sana pemeriksaan izinnya dipalsukan; yang menangkapnya adalah
+`TestIzin_DasborTerbukaBagiPeranYangMemakainya`, yang mengadu
+`dashboard.ViewPermissions()` dengan matriks peran yang sebenarnya ada di
+basis data.
+
+Daftar izinnya diletakkan di paket `dashboard`, bukan di pemasangan rute, agar
+perubahannya tidak terpisah dari indikator yang dipaparkan paket itu.
+
+### Batas kredit
+
+Plafon piutang pelanggan kontrak sebelumnya hanya tersimpan dan ditampilkan.
+Kolomnya ada sejak migrasi awal, tetapi tidak ada satu pun jalur yang
+membacanya untuk mengambil keputusan, sehingga pelanggan kontrak dapat memesan
+tanpa batas. SRS-ADM-002 menuntut penolakan dengan kode
+`CREDIT_LIMIT_EXCEEDED`.
+
+Yang dihitung sebagai piutang adalah pesanan yang dibuat dengan termin, belum
+dibatalkan, dan belum punya pembayaran berhasil. Ketiga syaratnya perlu
+semuanya: pesanan tanpa termin sudah dibayar di muka, pesanan batal tidak perlu
+dibayar, dan pesanan bertermin yang dilunasi lebih awal bukan piutang lagi.
+Pesanan yang sudah selesai diantar tetap dihitung bila belum dibayar, karena
+itu justru inti penjualan bertermin.
+
+Pemeriksaannya diletakkan **sebelum** `scheduling.Reserve`, supaya pesanan yang
+akhirnya ditolak tidak sempat menahan kuota slot yang dibutuhkan pesanan lain.
+
+Plafon bernilai nol berarti tanpa batas, bukan nol rupiah. Itu nilai bawaan
+kolomnya, dan menafsirkannya sebagai nol rupiah akan menolak seluruh pesanan
+setiap pelanggan kontrak yang plafonnya belum diisi.
+
+Penolakannya menyertakan angka piutang, nilai pesanan, dan plafon pada
+`details`. Itu perlu karena `customer.view_finance` hanya dipegang Keuangan dan
+Super Admin, sehingga Admin Operasional yang menerima pesanan lewat telepon
+tidak dapat membuka `GET /v1/customers/:id/credit` dan harus tahu alasannya
+dari jawaban penolakan itu sendiri.
+
+### Dua pelajaran yang disimpan sebagai uji
+
+Pertama, galat teknis tidak boleh terbaca sebagai izin. `CheckCreditTx` mula
+mula membalas `nil` untuk galat apa pun dari query termin kontrak, menyamakan
+"tidak ada termin aktif" dengan "gagal membaca". Akibatnya satu gangguan sesaat
+pada basis data mematikan kendali plafon dan pesanan di atas batas lewat tanpa
+meninggalkan jejak. Sekarang hanya `pgx.ErrNoRows` yang berarti tanpa termin.
+Dijaga `TestBatasKredit_GalatBacaTerminTidakDianggapTanpaTermin`.
+
+Kedua, pemeriksaan izin yang gagal juga harus menutup pintu, bukan
+membukanya. `httpx` kini punya ujinya sendiri untuk itu, termasuk untuk daftar
+izin yang kosong: rute yang terpasang tanpa izin menolak semua permintaan.
+
+### Uji
+
+| Uji                                                 | Yang dijaga                                       |
+| --------------------------------------------------- | ------------------------------------------------- |
+| `TestBatasKredit_PesananMelampauiPlafonDitolak`     | plafon benar benar menolak, bukan hanya tercatat  |
+| `TestBatasKredit_PlafonNolBerartiTanpaBatas`        | nilai bawaan kolom tidak menolak semua pesanan    |
+| `TestBatasKredit_PelangganRitelTidakDiperiksa`      | pelanggan tanpa termin tidak terkena plafon       |
+| `TestBatasKredit_PesananBatalTidakDihitung`         | pesanan batal keluar dari piutang                 |
+| `TestBatasKredit_BersamaanTidakMelampauiPlafon`     | dua checkout bersamaan tidak sama sama lolos      |
+| `TestBatasKredit_GalatBacaTermin...`                | galat teknis tidak mematikan kendali plafon       |
+| `TestKeadaanKredit_SisaTidakNegatif`                | sisa plafon terlampaui ditampilkan nol            |
+| `TestIzin_DasborTerbukaBagiPeranYangMemakainya`     | gerbang dashboard cocok dengan matriks peran      |
+| `TestIzin_BagianKeuanganDasborTerbatas`             | angka keuangan hanya untuk yang berwenang         |
+| `TestRequireAnyPermission_*`                        | middleware "salah satu dari" beserta batasnya     |
