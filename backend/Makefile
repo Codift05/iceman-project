@@ -8,7 +8,7 @@ DSN      ?= $(DATABASE_URL)
 TEST_DSN ?= $(subst /iceman?,/iceman_test?,$(DATABASE_URL))
 COMPOSE  := docker compose --env-file ../.env -f ../deploy/docker-compose.yml
 
-.PHONY: help up down logs run worker test test-short race lint tidy fresh seed
+.PHONY: help up down logs run worker test test-short race lint tidy fresh seed db-ready
 
 help:
 	@echo "up        jalankan basis data"
@@ -17,6 +17,8 @@ help:
 	@echo "worker    jalankan pekerja latar (pembuat slot harian)"
 	@echo "test      seluruh uji, termasuk konkurensi"
 	@echo "race      uji dengan deteksi kondisi balapan"
+	@echo "          test dan race menolak jalan bila basis data uji mati,"
+	@echo "          karena uji yang melewati dirinya sendiri tetap tampak hijau"
 	@echo "fresh     hapus basis data uji lalu uji ulang dari nol"
 	@echo "seed      buat pengguna pengembangan, contoh:"
 	@echo "          make seed ROLE=ADMIN_OPS EMAIL=ops@iceman.test PASSWORD=rahasia"
@@ -52,13 +54,27 @@ worker:
 #
 # Pilihan lain adalah satu basis data per paket, namun untuk ukuran uji ini
 # biayanya tidak sepadan: seluruh uji selesai dalam beberapa detik.
-test:
+# db-ready menolak menjalankan uji bila basis data uji tidak dapat dihubungi.
+#
+# Uji pada repositori ini melewati dirinya sendiri ketika basis data tidak
+# tersedia, supaya pembaca tanpa Docker tetap dapat menjalankan "go test".
+# Akibatnya "make test" dapat tampak hijau padahal tidak ada satu pun uji yang
+# benar benar berjalan, dan itu pernah terjadi: container basis data mati di
+# tengah pekerjaan, dan seluruh paket tetap melaporkan ok.
+#
+# Penjaga ini membuat hijau palsu itu tidak mungkin terjadi lewat make.
+db-ready:
+	@docker exec iceman-db pg_isready -U $(POSTGRES_USER) -d $(POSTGRES_DB) >/dev/null 2>&1 || { \
+		echo "basis data uji tidak dapat dihubungi. Jalankan 'make up' lebih dahulu."; \
+		exit 1; }
+
+test: db-ready
 	ICEMAN_TEST_DSN="$(TEST_DSN)" go test ./... -count=1 -p 1
 
-test-short:
+test-short: db-ready
 	ICEMAN_TEST_DSN="$(TEST_DSN)" go test ./... -short -count=1 -p 1
 
-race:
+race: db-ready
 	ICEMAN_TEST_DSN="$(TEST_DSN)" go test ./... -race -count=1 -p 1
 
 seed:
