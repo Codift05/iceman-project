@@ -279,6 +279,23 @@ func main() {
 	secured.GET("/payments/events/review", payHandler.EventsNeedingReview,
 		izin("payment.manage"))
 
+	// Rekonsiliasi. Melihat, mengekspor, dan mengoreksi dipisahkan izinnya:
+	// yang boleh membaca laporan belum tentu boleh mengubah angkanya.
+	secured.GET("/finance/reconciliation", payHandler.Reconcile,
+		izin("report.view_financial"))
+	secured.GET("/finance/reconciliation.csv", payHandler.ReconcileCSV,
+		izin("report.export"))
+	secured.POST("/finance/settlements/import", payHandler.ImportSettlements,
+		izin("payment.manage"))
+	secured.GET("/finance/reconciliation/flags", payHandler.OpenFlags,
+		izin("report.view_financial"))
+	secured.POST("/finance/reconciliation/flags", payHandler.FlagDiscrepancy,
+		izin("payment.manage"))
+	secured.POST("/finance/reconciliation/flags/:id/resolve", payHandler.ResolveFlag,
+		izin("payment.manage"))
+	secured.PUT("/payments/:id/provider-fee", payHandler.CorrectFee,
+		izin("payment.manage"))
+
 	// Penelusuran jejak audit, hanya untuk peran yang berwenang.
 	auditReader := audit.NewReader(pool)
 	secured.GET("/admin/audit-trail", func(c echo.Context) error {

@@ -24,6 +24,13 @@ import (
 // menghabiskan memori server dengan satu permintaan besar.
 const MaxWebhookBody = 1 << 20 // 1 MiB
 
+// MaxSettlementFile adalah batas ukuran berkas settlement yang dibaca.
+//
+// Berkas settlement satu bulan untuk ribuan transaksi masih jauh di bawah
+// batas ini, sedangkan tanpa batas satu unggahan besar dapat menghabiskan
+// memori server.
+const MaxSettlementFile = 16 << 20 // 16 MiB
+
 // EventQueuer mengantre pemrosesan event webhook.
 //
 // Dinyatakan sebagai antarmuka agar paket ini tidak mengimpor paket pekerja,
@@ -337,6 +344,13 @@ func codeFor(err error) string {
 		return "REASON_REQUIRED"
 	case errors.Is(err, ErrAmountMismatch):
 		return "VALIDATION_FAILED"
+	case errors.Is(err, ErrFlagNotFound):
+		return "NOT_FOUND"
+	case errors.Is(err, ErrPeriodInvalid), errors.Is(err, ErrFlagNoSubject),
+		errors.Is(err, ErrFeeInvalid):
+		return "VALIDATION_FAILED"
+	case errors.Is(err, ErrAlreadyFlagged):
+		return "CONFLICT"
 	default:
 		return "INTERNAL"
 	}
@@ -348,7 +362,187 @@ func detailFor(err error) []httpx.Detail {
 		return []httpx.Detail{{Field: "reason", Message: "Alasan wajib diisi."}}
 	case errors.Is(err, ErrRefundExceeds):
 		return []httpx.Detail{{Field: "amount_cents", Message: err.Error()}}
+	case errors.Is(err, ErrPeriodInvalid):
+		return []httpx.Detail{{Field: "from", Message: err.Error()}}
+	case errors.Is(err, ErrFlagNoSubject):
+		return []httpx.Detail{{Field: "payment_id",
+			Message: "Sebutkan pembayaran atau settlement yang ditandai."}}
+	case errors.Is(err, ErrFeeInvalid):
+		return []httpx.Detail{{Field: "fee_cents", Message: err.Error()}}
 	default:
 		return nil
 	}
+}
+
+// --- rekonsiliasi ---
+
+// Reconcile menyusun laporan rekonsiliasi satu periode.
+func (h *Handler) Reconcile(c echo.Context) error {
+	hasil, err := h.svc.Reconcile(c.Request().Context(), ReconcileFilter{
+		From:     c.QueryParam("from"),
+		Until:    c.QueryParam("until"),
+		OnlyDiff: c.QueryParam("only_diff") == "true",
+	})
+	if err != nil {
+		return httpx.Fail(c, codeFor(err), detailFor(err)...)
+	}
+	return c.JSON(http.StatusOK, hasil)
+}
+
+// ReconcileCSV mengekspor laporan rekonsiliasi sebagai CSV.
+//
+// Nama berkasnya memuat periodenya, supaya berkas yang sudah diunduh tetap
+// dapat dikenali tanpa membukanya.
+func (h *Handler) ReconcileCSV(c echo.Context) error {
+	f := ReconcileFilter{
+		From:     c.QueryParam("from"),
+		Until:    c.QueryParam("until"),
+		OnlyDiff: c.QueryParam("only_diff") == "true",
+	}
+	hasil, err := h.svc.Reconcile(c.Request().Context(), f)
+	if err != nil {
+		return httpx.Fail(c, codeFor(err), detailFor(err)...)
+	}
+
+	nama := "rekonsiliasi-" + f.From + "-sampai-" + f.Until + ".csv"
+	c.Response().Header().Set(echo.HeaderContentDisposition,
+		`attachment; filename="`+nama+`"`)
+	c.Response().Header().Set(echo.HeaderContentType, "text/csv; charset=utf-8")
+	c.Response().WriteHeader(http.StatusOK)
+	if err := hasil.ExportCSV(c.Response()); err != nil {
+		// Judul sudah terkirim, jadi galatnya tidak dapat lagi disampaikan
+		// sebagai badan JSON. Yang dapat dilakukan hanya menghentikan
+		// penulisan; klien akan melihat berkas yang terpotong.
+		return err
+	}
+	return nil
+}
+
+// ImportSettlements memasukkan berkas settlement dari penyedia.
+//
+// Berkas diterima sebagai unggahan multipart, bukan badan JSON, karena yang
+// dipegang petugas keuangan adalah berkas CSV dari penyedia apa adanya.
+func (h *Handler) ImportSettlements(c echo.Context) error {
+	berkas, err := c.FormFile("file")
+	if err != nil {
+		return httpx.Fail(c, "VALIDATION_FAILED",
+			httpx.Detail{Field: "file", Message: "Berkas settlement wajib diunggah."})
+	}
+	f, err := berkas.Open()
+	if err != nil {
+		return httpx.Fail(c, "VALIDATION_FAILED",
+			httpx.Detail{Field: "file", Message: "Berkas tidak dapat dibaca."})
+	}
+	defer f.Close()
+
+	rows, ditolak, err := ParseSettlementCSV(io.LimitReader(f, MaxSettlementFile))
+	if err != nil {
+		return httpx.Fail(c, "VALIDATION_FAILED",
+			httpx.Detail{Field: "file", Message: "Berkas bukan CSV yang terbaca."})
+	}
+
+	hasil, err := h.svc.ImportSettlements(c.Request().Context(), rows)
+	if err != nil {
+		return httpx.Fail(c, codeFor(err), detailFor(err)...)
+	}
+	// Baris yang gagal dibaca dan baris yang gagal disimpan dilaporkan
+	// bersama, karena bagi petugas keuangan keduanya sama artinya: baris itu
+	// belum masuk dan perlu diperiksa.
+	hasil.Rejected = append(ditolak, hasil.Rejected...)
+	return c.JSON(http.StatusOK, hasil)
+}
+
+type flagRequest struct {
+	PaymentID    string `json:"payment_id"`
+	SettlementID string `json:"settlement_id"`
+	Kind         string `json:"kind"`
+	Note         string `json:"note"`
+}
+
+// FlagDiscrepancy menandai sebuah selisih untuk ditindaklanjuti.
+func (h *Handler) FlagDiscrepancy(c echo.Context) error {
+	var req flagRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.Fail(c, "VALIDATION_FAILED")
+	}
+
+	in := FlagInput{Kind: strings.ToUpper(req.Kind), Note: req.Note}
+	if req.PaymentID != "" {
+		id, err := uuid.Parse(req.PaymentID)
+		if err != nil {
+			return httpx.Fail(c, "VALIDATION_FAILED",
+				httpx.Detail{Field: "payment_id", Message: "Pengenal pembayaran tidak sah."})
+		}
+		in.PaymentID = &id
+	}
+	if req.SettlementID != "" {
+		id, err := uuid.Parse(req.SettlementID)
+		if err != nil {
+			return httpx.Fail(c, "VALIDATION_FAILED",
+				httpx.Detail{Field: "settlement_id", Message: "Pengenal settlement tidak sah."})
+		}
+		in.SettlementID = &id
+	}
+
+	f, err := h.svc.FlagDiscrepancy(c.Request().Context(), in)
+	if err != nil {
+		return httpx.Fail(c, codeFor(err), detailFor(err)...)
+	}
+	return c.JSON(http.StatusCreated, f)
+}
+
+type resolveRequest struct {
+	Note string `json:"note"`
+}
+
+// ResolveFlag menutup sebuah penandaan selisih.
+func (h *Handler) ResolveFlag(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.Fail(c, "NOT_FOUND")
+	}
+	var req resolveRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.Fail(c, "VALIDATION_FAILED")
+	}
+	if err := h.svc.ResolveFlag(c.Request().Context(), id, req.Note); err != nil {
+		return httpx.Fail(c, codeFor(err), detailFor(err)...)
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+// OpenFlags mengembalikan selisih yang belum diselesaikan.
+func (h *Handler) OpenFlags(c echo.Context) error {
+	batas := 0
+	if raw := c.QueryParam("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			batas = n
+		}
+	}
+	out, err := h.svc.OpenFlags(c.Request().Context(), batas)
+	if err != nil {
+		return httpx.Fail(c, "INTERNAL")
+	}
+	return c.JSON(http.StatusOK, map[string]any{"flags": out})
+}
+
+type feeRequest struct {
+	FeeCents int64  `json:"fee_cents"`
+	Reason   string `json:"reason"`
+}
+
+// CorrectFee mengoreksi biaya penyedia pada sebuah pembayaran.
+func (h *Handler) CorrectFee(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.Fail(c, "NOT_FOUND")
+	}
+	var req feeRequest
+	if err := c.Bind(&req); err != nil {
+		return httpx.Fail(c, "VALIDATION_FAILED")
+	}
+	if err := h.svc.CorrectFee(c.Request().Context(), id, req.FeeCents, req.Reason); err != nil {
+		return httpx.Fail(c, codeFor(err), detailFor(err)...)
+	}
+	return c.NoContent(http.StatusNoContent)
 }

@@ -71,6 +71,8 @@ db/migrations       migrasi goose, ditanam ke dalam binary
   masa simpan lewat pelepasan partisi.
 - Tagihan pembayaran, webhook penyedia yang idempoten dan berverifikasi tanda
   tangan, pemetaan status penyedia, serta refund penuh maupun sebagian.
+- Rekonsiliasi: pemasukan berkas settlement, laporan selisih per periode,
+  penandaan tindak lanjut, koreksi biaya yang teraudit, dan ekspor CSV.
 - Bentuk galat seragam dan pengenal permintaan.
 - Server HTTP dengan endpoint kesehatan dan mematikan diri dengan rapi.
 
@@ -116,6 +118,8 @@ Uji pada `internal/scheduling` adalah inti pembuktian rancangan, bukan pelengkap
 | `TestWebhook_EventSamaDuaKaliSatuCatatan` | DB-02, event kembar hanya tercatat sekali |
 | `TestWebhook_NominalTidakCocokTidakMelunasi` | pesanan hanya lunas bila nominalnya sama dengan tagihan |
 | `TestPemetaanStatus_DiujiBukanHanyaDidokumentasikan` | SRS-PAY-003, seluruh entri pemetaan diperiksa |
+| `TestRekonsiliasi_PembayaranTanpaSettlementTampilSebagaiSelisih` | SRS-PAY-005, yang belum diterima tidak disembunyikan |
+| `TestRekonsiliasi_SettlementTanpaPembayaranTampil` | uang masuk tanpa tagihan ikut tertelusuri |
 
 Dua uji pembanding terakhir sengaja dipertahankan. Bila suatu saat ada yang
 mengusulkan menghapus `FOR UPDATE` demi kecepatan, jalankan keduanya lebih
@@ -351,10 +355,9 @@ atas penyedia manual, dan menyambungkan penyedia sungguhan berarti menulis satu
 implementasi antarmuka Provider beserta nilai penyetelan verifikasi tanda
 tangannya.
 
-Rekonsiliasi belum dikerjakan. Tabel settlement sudah ada beserta kekangan yang
-memeriksa konsistensi gross, biaya, dan net, namun pemasukan berkas settlement
-dan laporan selisihnya (SRS-PAY-005) belum. Itu bagian Must Have yang tersisa
-pada domain pembayaran.
+Berkas settlement masih diunggah manual. Pengambilan otomatis dari penyedia
+menunggu pilihan penyedianya, karena setiap penyedia menyediakannya dengan cara
+yang berbeda.
 
 Pengelolaan pengguna internal belum punya endpoint. Membuat driver beserta
 deponya untuk sekarang lewat `make seed ROLE=DRIVER DEPOT=MDO-01`. Driver wajib
@@ -531,3 +534,62 @@ satukan kembali keduanya demi menghemat satu perjalanan ke basis data.
 Izin refund dipisahkan dari pengelolaan pembayaran, karena mengembalikan dana
 memindahkan uang keluar dan tidak setiap peran yang boleh melihat atau membuat
 tagihan boleh melakukannya.
+
+## Rekonsiliasi
+
+Laporan membandingkan pembayaran dengan baris settlement penyedia pada satu
+periode. Pembayaran yang belum muncul pada settlement tetap tampil sebagai
+selisih sebesar seluruh nominalnya, bukan nol dan bukan disembunyikan
+(SRS-PAY-005). Itu justru kasus yang paling perlu dilihat: uang yang sudah
+ditagihkan namun belum diterima.
+
+Baris settlement yang tidak cocok dengan pembayaran mana pun juga ikut tampil,
+dengan selisih negatif. Uang yang masuk tanpa diketahui asalnya sama perlunya
+ditelusuri.
+
+Pembayaran dan settlement disaring menurut tanggal yang berbeda: pembayaran
+menurut waktu pembayarannya, settlement menurut tanggal settlementnya. Karena
+itu keduanya digabung dengan `UNION ALL`, bukan `FULL OUTER JOIN` yang memaksa
+satu syarat tanggal untuk keduanya; pembayaran akhir bulan yang disettlement
+awal bulan berikutnya akan hilang dari kedua periode.
+
+Satu baris berkas settlement yang rusak dilewati beserta alasannya, bukan
+menggagalkan seluruh berkas. Namun seluruh berkas dimasukkan dalam satu
+transaksi, karena berkas settlement adalah satu kesatuan laporan dari penyedia
+dan memasukkannya separuh membuat laporan menunjukkan selisih yang sebenarnya
+hanya belum terbaca.
+
+Berkas CSV diterima dengan maupun tanpa judul kolom. Menolak salah satunya
+berarti petugas keuangan harus menyuntingnya lebih dahulu. Nominal dibaca
+sebagai rupiah lalu dikonversi ke sen, sama seperti pada webhook.
+
+Selisih dapat ditandai untuk tindak lanjut. Menandai hal yang sama dua kali
+ditolak, karena hanya menambah pekerjaan tinjauan tanpa menambah informasi;
+setelah diselesaikan, hal yang sama dapat ditandai lagi bila muncul kembali.
+Catatan penutup ditambahkan ke catatan awal, bukan menggantinya: yang pertama
+menjelaskan apa selisihnya, yang kedua bagaimana diselesaikan.
+
+Penyelesaian selisih wajib menyebut pelakunya, dijaga kekangan basis data.
+Selisih yang ditutup tanpa ada yang bertanggung jawab tidak dapat ditanyakan
+kembali.
+
+Koreksi manual biaya penyedia tercatat beserta nilai lama dan barunya. Biaya
+yang melebihi nominal pembayaran ditolak dengan pesan yang menyebut
+kemungkinan salah satuan, karena memasukkan rupiah sebagai sen adalah
+kesalahan yang paling sering terjadi di tempat ini.
+
+Pembacaan laporan tercatat pada jejak audit. Laporan ini memuat seluruh
+penerimaan satu periode, dan siapa yang membukanya perlu dapat ditelusuri.
+
+| Endpoint | Izin |
+|---|---|
+| `GET /v1/finance/reconciliation` | `report.view_financial` |
+| `GET /v1/finance/reconciliation.csv` | `report.export` |
+| `POST /v1/finance/settlements/import` | `payment.manage` |
+| `GET /v1/finance/reconciliation/flags` | `report.view_financial` |
+| `POST /v1/finance/reconciliation/flags` | `payment.manage` |
+| `POST /v1/finance/reconciliation/flags/:id/resolve` | `payment.manage` |
+| `PUT /v1/payments/:id/provider-fee` | `payment.manage` |
+
+Melihat, mengekspor, dan mengubah dipisahkan izinnya: yang boleh membaca
+laporan belum tentu boleh mengubah angkanya.
