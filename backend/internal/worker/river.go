@@ -63,6 +63,23 @@ type PaymentOps interface {
 	ApplyEvent(ctx context.Context, eventRowID uuid.UUID) error
 }
 
+// QueueNotification adalah antrean terpisah untuk notifikasi.
+//
+// Dipisahkan dari antrean baku agar lonjakan notifikasi tidak menunda
+// pekerjaan yang menyangkut uang dan jadwal. Satu pesanan dapat memicu
+// beberapa notifikasi, dan layanan kanal yang lambat akan menahan pekerja
+// selama itu.
+const QueueNotification = "notification"
+
+// NotificationOps adalah apa yang dibutuhkan pekerja dari domain notifikasi.
+//
+// Dinyatakan sebagai antarmuka di sini dengan alasan yang sama seperti
+// PaymentOps: paket pesanan mengimpor paket ini untuk mengantre job, sehingga
+// mengimpor paket notifikasi dari sini akan membentuk lingkaran.
+type NotificationOps interface {
+	Send(ctx context.Context, notificationID uuid.UUID) error
+}
+
 // Deps adalah apa yang dibutuhkan pekerja saat menjalankan job.
 type Deps struct {
 	Pool *pgxpool.Pool
@@ -71,6 +88,8 @@ type Deps struct {
 	// mencatat peringatan dan ditandai selesai, sehingga antrean tidak
 	// tersumbat pada lingkungan yang belum menyetelnya.
 	Payments PaymentOps
+	// Notifications boleh kosong, dengan alasan yang sama.
+	Notifications NotificationOps
 }
 
 // Options mengatur bagaimana pekerja dijalankan.
@@ -99,12 +118,24 @@ func NewWorker(d Deps, opt Options) (*river.Client[pgx.Tx], error) {
 	if err := river.AddWorkerSafely(workers, &ProcessPaymentEventWorker{Deps: d}); err != nil {
 		return nil, fmt.Errorf("mendaftarkan pekerja pemroses event pembayaran: %w", err)
 	}
+	if err := river.AddWorkerSafely(workers, &SendNotificationWorker{Deps: d}); err != nil {
+		return nil, fmt.Errorf("mendaftarkan pekerja pengirim notifikasi: %w", err)
+	}
+	if err := river.AddWorkerSafely(workers, &NotificationSweepWorker{Deps: d}); err != nil {
+		return nil, fmt.Errorf("mendaftarkan pekerja penyapu notifikasi: %w", err)
+	}
 
 	queues := opt.Queues
 	if queues == nil {
 		queues = map[string]river.QueueConfig{
 			river.QueueDefault: {MaxWorkers: 5},
 		}
+	}
+	// Antrean notifikasi selalu dilayani, walau pemanggil hanya menyebut
+	// antrean baku. Job notifikasi yang diantre tanpa ada yang melayaninya
+	// akan menumpuk tanpa terlihat.
+	if _, ada := queues[QueueNotification]; !ada {
+		queues[QueueNotification] = river.QueueConfig{MaxWorkers: 3}
 	}
 
 	var periodic []*river.PeriodicJob
@@ -121,6 +152,19 @@ func NewWorker(d Deps, opt Options) (*river.Client[pgx.Tx], error) {
 				return GenerateSlotsArgs{Days: 30}, nil
 			},
 			&river.PeriodicJobOpts{RunOnStart: true},
+		))
+
+		// Notifikasi yang tertinggal disapu setiap sepuluh menit. Dalam
+		// keadaan normal tidak ada yang tertinggal, karena notifikasi diantre
+		// dalam transaksi yang sama dengan perubahan yang memicunya. Penyapu
+		// ini untuk keadaan yang tidak normal, dan jedanya pendek supaya
+		// pelanggan tidak menunggu lama ketika itu terjadi.
+		periodic = append(periodic, river.NewPeriodicJob(
+			river.PeriodicInterval(10*time.Minute),
+			func() (river.JobArgs, *river.InsertOpts) {
+				return NotificationSweepArgs{OlderThanMinutes: 5}, nil
+			},
+			&river.PeriodicJobOpts{RunOnStart: false},
 		))
 
 		// Partisi posisi driver disiapkan dan dibersihkan sekali sehari.
