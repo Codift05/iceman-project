@@ -66,23 +66,48 @@ func RequireAuth(parse ParseToken) echo.MiddlewareFunc {
 // Setiap penolakan dicatat pada jejak audit, sesuai SRS-AUT-006 yang
 // mewajibkan percobaan akses yang ditolak dapat ditelusuri.
 func RequirePermission(check CheckPermission, permission string, onDeny RecordDenial) echo.MiddlewareFunc {
+	return requirePermissions(check, []string{permission}, permission, onDeny)
+}
+
+// RequireAnyPermission meneruskan permintaan bila perannya memegang sedikitnya
+// satu dari izin yang disebut.
+//
+// Dipakai pada halaman yang menyatukan beberapa kewenangan. Dasbor ringkasan
+// misalnya dibuka Admin Operasional lewat report.view_operational, Keuangan
+// lewat report.view_financial, dan Manajemen lewat report.view_summary; menuntut
+// satu izin saja akan menutup halaman bagi peran yang justru paling sering
+// memakainya. Bagian yang sensitif tetap disaring di dalam handler, agar peran
+// yang hanya berwenang atas sebagian halaman tidak kehilangan seluruhnya.
+func RequireAnyPermission(check CheckPermission, permissions []string, onDeny RecordDenial) echo.MiddlewareFunc {
+	return requirePermissions(check, permissions,
+		"salah satu dari "+strings.Join(permissions, ", "), onDeny)
+}
+
+// requirePermissions menolak bila tidak satu pun izin dipegang.
+//
+// Daftar izin yang kosong menolak semua permintaan. Itu keadaan yang mustahil
+// benar, tetapi menutup pintu lebih aman daripada membukanya bila suatu saat
+// rute dipasang tanpa izin.
+func requirePermissions(check CheckPermission, permissions []string, butuh string, onDeny RecordDenial) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			p := PrincipalFrom(c)
 			if p == nil {
 				return Fail(c, "AUTH_REQUIRED")
 			}
-			ok, err := check(c, p.Role, permission)
-			if err != nil {
-				return Fail(c, "INTERNAL")
-			}
-			if !ok {
-				if onDeny != nil {
-					onDeny(c, permission)
+			for _, permission := range permissions {
+				ok, err := check(c, p.Role, permission)
+				if err != nil {
+					return Fail(c, "INTERNAL")
 				}
-				return Fail(c, "FORBIDDEN")
+				if ok {
+					return next(c)
+				}
 			}
-			return next(c)
+			if onDeny != nil {
+				onDeny(c, butuh)
+			}
+			return Fail(c, "FORBIDDEN")
 		}
 	}
 }
