@@ -3,6 +3,8 @@ package identity_test
 import (
 	"context"
 	"testing"
+
+	"github.com/iceman/backend/internal/dashboard"
 )
 
 // Matriks ini menyalin PRD Bab 16. Bila seed peran diubah tanpa memperbarui
@@ -111,5 +113,79 @@ func TestIzin_DriverPalingSempit(t *testing.T) {
 	}
 	if len(codes) != 2 {
 		t.Fatalf("Driver memegang %d izin (%v), seharusnya tepat 2", len(codes), codes)
+	}
+}
+
+// Dashboard adalah halaman yang paling sering dibuka, dan izinnya tersebar di
+// tiga kode berbeda. Uji ini mengadu daftar izin yang dipakai paket dashboard
+// dengan matriks peran yang sebenarnya ada di basis data.
+//
+// Tanpa uji ini, dashboard pernah dipagari satu izin saja, yaitu
+// report.view_summary, sehingga Admin Operasional dan Keuangan menerima 403
+// pada halaman yang justru mereka pakai setiap hari. Kesalahan seperti itu
+// tidak terlihat dari uji handler, karena di sana pemeriksaan izinnya dipalsukan.
+func TestIzin_DasborTerbukaBagiPeranYangMemakainya(t *testing.T) {
+	svc, pool := newService(t)
+	ctx := context.Background()
+
+	kasus := []struct {
+		peran string
+		boleh bool
+	}{
+		{"SUPER_ADMIN", true},
+		{"ADMIN_OPS", true},  // lewat report.view_operational
+		{"FINANCE", true},    // lewat report.view_financial
+		{"MANAGEMENT", true}, // lewat report.view_summary
+		{"DRIVER", false},    // tidak memegang izin laporan apa pun
+	}
+
+	for _, k := range kasus {
+		rid := roleID(t, pool, k.peran)
+
+		// Meniru RequireAnyPermission: cukup satu izin yang dipegang.
+		terbuka := false
+		var dipegang []string
+		for _, izin := range dashboard.ViewPermissions() {
+			ok, err := svc.Can(ctx, rid, izin)
+			if err != nil {
+				t.Fatalf("memeriksa izin %s: %v", izin, err)
+			}
+			if ok {
+				terbuka = true
+				dipegang = append(dipegang, izin)
+			}
+		}
+
+		if terbuka != k.boleh {
+			t.Errorf("dashboard bagi %s terbuka=%v, seharusnya %v (izin dipegang: %v)",
+				k.peran, terbuka, k.boleh, dipegang)
+		}
+	}
+}
+
+// Bagian keuangan pada dashboard hanya untuk yang berwenang atas angka uang.
+// Admin Operasional membuka dashboard tetapi tidak melihat bagian itu, dan
+// itulah sebabnya penyaringannya ada di dalam layanan, bukan berupa 403.
+func TestIzin_BagianKeuanganDasborTerbatas(t *testing.T) {
+	svc, pool := newService(t)
+	ctx := context.Background()
+
+	kasus := map[string]bool{
+		"SUPER_ADMIN": true,
+		"FINANCE":     true,
+		"MANAGEMENT":  true,
+		"ADMIN_OPS":   false,
+		"DRIVER":      false,
+	}
+
+	for peran, boleh := range kasus {
+		got, err := svc.Can(ctx, roleID(t, pool, peran), dashboard.FinancePermission)
+		if err != nil {
+			t.Fatalf("memeriksa izin: %v", err)
+		}
+		if got != boleh {
+			t.Errorf("%s terhadap %s = %v, seharusnya %v",
+				peran, dashboard.FinancePermission, got, boleh)
+		}
 	}
 }

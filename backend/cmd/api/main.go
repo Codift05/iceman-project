@@ -26,6 +26,7 @@ import (
 	"github.com/iceman/backend/internal/cart"
 	"github.com/iceman/backend/internal/catalog"
 	"github.com/iceman/backend/internal/customer"
+	"github.com/iceman/backend/internal/dashboard"
 	"github.com/iceman/backend/internal/delivery"
 	"github.com/iceman/backend/internal/httpx"
 	"github.com/iceman/backend/internal/identity"
@@ -135,6 +136,9 @@ func main() {
 
 	izin := func(permission string) echo.MiddlewareFunc {
 		return httpx.RequirePermission(checkPermission, permission, recordDenial)
+	}
+	izinSalahSatu := func(permissions ...string) echo.MiddlewareFunc {
+		return httpx.RequireAnyPermission(checkPermission, permissions, recordDenial)
 	}
 
 	secured.GET("/depots", sched.ListDepots, izin("depot.view"))
@@ -315,6 +319,25 @@ func main() {
 	secured.GET("/notifications", notifyHandler.List, izin("settings.view"))
 	secured.GET("/notifications/settings", notifyHandler.Settings, izin("settings.view"))
 	secured.PUT("/notifications/settings", notifyHandler.SetSetting, izin("settings.manage"))
+
+	// Dashboard operasional. Indikator keuangan hanya ikut bila pemanggil
+	// memegang report.view_financial, dan penyaringannya dilakukan di dalam
+	// layanan, bukan di lapisan HTTP, supaya angka keuangan tidak mungkin
+	// ikut terkirim karena ada yang lupa menyaring satu kolom.
+	dashHandler := dashboard.NewHandler(dashboard.NewService(pool),
+		checkPermission, dashboard.FinancePermission)
+	// Dasbor dibuka oleh pemegang izin laporan mana pun. Matriks peran memberi
+	// report.view_operational kepada Admin Operasional, report.view_financial
+	// kepada Keuangan, dan report.view_summary kepada Manajemen; menuntut satu
+	// izin saja akan menutup dasbor bagi dua peran yang justru membukanya tiap
+	// hari. Pembatasan angka keuangan tetap terjadi di dalam layanan.
+	lihatDasbor := izinSalahSatu(dashboard.ViewPermissions()...)
+	secured.GET("/dashboard", dashHandler.Indicators, lihatDasbor)
+	secured.GET("/dashboard/definitions", dashHandler.Definitions, lihatDasbor)
+
+	// Keadaan piutang pelanggan, dipakai sebelum menerima pesanan bertermin.
+	secured.GET("/customers/:id/credit", customerHandler.Credit,
+		izin("customer.view_finance"))
 
 	// Penelusuran jejak audit, hanya untuk peran yang berwenang.
 	auditReader := audit.NewReader(pool)
