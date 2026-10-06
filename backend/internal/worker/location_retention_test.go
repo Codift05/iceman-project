@@ -22,7 +22,8 @@ func TestMasaSimpanPosisi_MenyiapkanDanMelepasPartisi(t *testing.T) {
 	lama := time.Now().AddDate(0, -6, 0)
 	namaLama := "driver_locations_" + lama.Format("2006_01")
 	if _, err := pool.Exec(ctx,
-		`SELECT ensure_driver_location_partition($1::date)`, lama.Format("2006-01-02")); err != nil {
+		`SELECT ensure_monthly_partition('driver_locations', $1::date)`,
+		lama.Format("2006-01-02")); err != nil {
 		t.Fatalf("menyiapkan partisi lama: %v", err)
 	}
 

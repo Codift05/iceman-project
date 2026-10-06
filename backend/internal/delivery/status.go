@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/iceman/backend/internal/audit"
+	"github.com/iceman/backend/internal/notify"
 	"github.com/iceman/backend/internal/order"
 )
 
@@ -133,6 +134,17 @@ func (d *Deliveries) ChangeStatus(ctx context.Context, deliveryID uuid.UUID, to 
 		Detail: rinciTransisi(dari, to, alasan),
 	}); err != nil {
 		return nil, err
+	}
+
+	// Notifikasi diantre dalam transaksi yang sama. Inilah efek samping
+	// "Antre notifikasi" pada tabel transisi SRS Bab 5.1 untuk perpindahan
+	// menuju OUT_FOR_DELIVERY dan COMPLETED, ditambah pemberitahuan gagal
+	// kirim yang dibutuhkan pelanggan agar tidak menunggu sia sia.
+	if event := notifyEvent(to); event != "" && d.notifier != nil {
+		if err := d.notifier.EmitForOrderTx(ctx, tx, event, orderID,
+			alasanUntukPelanggan(to, alasan)); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -344,4 +356,33 @@ func (d *Deliveries) ReportIssue(ctx context.Context, deliveryID uuid.UUID, in I
 		return nil, fmt.Errorf("menyimpan kendala: %w", err)
 	}
 	return &x, nil
+}
+
+// notifyEvent memetakan status pengiriman ke event notifikasi.
+//
+// Hanya tiga status yang berarti bagi pelanggan. Penerimaan tugas oleh driver
+// dan kedatangannya di lokasi adalah kemajuan internal; memberitahukannya
+// membuat pelanggan menerima pesan yang tidak menuntut tindakan apa pun.
+func notifyEvent(status string) string {
+	switch status {
+	case StatusOnTheWay:
+		return notify.EventOrderOutForDelivery
+	case StatusDelivered:
+		return notify.EventOrderCompleted
+	case StatusFailed:
+		return notify.EventDeliveryFailed
+	default:
+		return ""
+	}
+}
+
+// alasanUntukPelanggan memilih alasan yang layak disampaikan kepada pelanggan.
+//
+// Alasan gagal kirim disampaikan karena pelanggan perlu tahu mengapa
+// pesanannya belum tiba. Alasan pada perpindahan lain adalah catatan internal.
+func alasanUntukPelanggan(status, alasan string) string {
+	if status == StatusFailed && alasan != "" {
+		return "Alasan: " + alasan + "."
+	}
+	return ""
 }

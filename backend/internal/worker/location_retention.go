@@ -55,7 +55,7 @@ func (w *LocationRetentionWorker) Work(ctx context.Context, job *river.Job[Locat
 		bulan := now.AddDate(0, i, 0).Format("2006-01-02")
 		var nama string
 		err := w.Pool.QueryRow(ctx,
-			`SELECT ensure_driver_location_partition($1::date)`, bulan).Scan(&nama)
+			`SELECT ensure_monthly_partition('driver_locations', $1::date)`, bulan).Scan(&nama)
 		if err != nil {
 			return fmt.Errorf("menyiapkan partisi posisi bulan %s: %w", bulan, err)
 		}

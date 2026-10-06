@@ -29,6 +29,7 @@ import (
 	"github.com/iceman/backend/internal/delivery"
 	"github.com/iceman/backend/internal/httpx"
 	"github.com/iceman/backend/internal/identity"
+	"github.com/iceman/backend/internal/notify"
 	"github.com/iceman/backend/internal/order"
 	"github.com/iceman/backend/internal/payment"
 	"github.com/iceman/backend/internal/scheduling"
@@ -162,12 +163,23 @@ func main() {
 			"error", err)
 	}
 
+	// Notifikasi. Kanal sungguhan belum dipilih (OQ-012), sehingga kanal
+	// catatan dipakai: notifikasi dicatat lengkap tanpa dikirim ke mana pun.
+	// Seluruh jalurnya tetap berjalan dan dapat dipantau, dan menyambungkan
+	// kanal sungguhan nanti berarti menambah satu implementasi antarmuka.
+	notifier := notify.NewService(notify.Deps{
+		Pool:     pool,
+		Channels: notify.NewRegistry(notify.LogChannel{Log: log}),
+		Enqueuer: notifyEnqueuer{queue: queue},
+	})
+
 	products := catalog.NewProducts(pool)
 	customers := customer.NewCustomers(pool)
 	carts := cart.NewCarts(pool, products)
 	slots := scheduling.NewSlots(pool)
 	orders := order.NewOrders(order.Deps{
-		Pool: pool, Carts: carts, Customers: customers, Slots: slots, Queue: queue,
+		Pool: pool, Carts: carts, Customers: customers, Slots: slots,
+		Queue: queue, Notifier: notifier,
 	})
 
 	catalogHandler := catalog.NewHandler(products)
@@ -224,7 +236,7 @@ func main() {
 		izin(order.ReschedulePermission()))
 
 	// Pengiriman: penugasan driver, modul driver, dan pelacakan posisi.
-	deliveries := delivery.NewDeliveries(pool)
+	deliveries := delivery.NewDeliveries(delivery.Deps{Pool: pool, Notifier: notifier})
 	deliveryHandler := delivery.NewHandler(deliveries)
 
 	secured.GET("/deliveries", deliveryHandler.List, izin("dispatch.manage"))
@@ -262,7 +274,9 @@ func main() {
 	// tagihan dicatat dan pembayarannya dikonfirmasi admin. Jalur itu tetap
 	// dipakai setelah QRIS aktif, untuk pelanggan yang membayar lewat transfer
 	// atau tunai.
-	pay := payment.NewService(payment.Deps{Pool: pool, Provider: payment.ManualProvider{}})
+	pay := payment.NewService(payment.Deps{
+		Pool: pool, Provider: payment.ManualProvider{}, Notifier: notifier,
+	})
 	payHandler := payment.NewHandler(pay, webhookVerifier(log), queueAdapter{queue: queue})
 
 	// Webhook terbuka tanpa token, karena yang memanggilnya penyedia
@@ -295,6 +309,12 @@ func main() {
 		izin("payment.manage"))
 	secured.PUT("/payments/:id/provider-fee", payHandler.CorrectFee,
 		izin("payment.manage"))
+
+	// Pengaturan dan pemantauan notifikasi.
+	notifyHandler := notify.NewHandler(notifier)
+	secured.GET("/notifications", notifyHandler.List, izin("settings.view"))
+	secured.GET("/notifications/settings", notifyHandler.Settings, izin("settings.view"))
+	secured.PUT("/notifications/settings", notifyHandler.SetSetting, izin("settings.manage"))
 
 	// Penelusuran jejak audit, hanya untuk peran yang berwenang.
 	auditReader := audit.NewReader(pool)
@@ -388,4 +408,21 @@ func webhookVerifier(log *slog.Logger) payment.Verifier {
 		Algo:   env("PAYMENT_WEBHOOK_ALGO", "sha256"),
 		Prefix: os.Getenv("PAYMENT_WEBHOOK_PREFIX"),
 	}
+}
+
+// notifyEnqueuer menyambungkan domain notifikasi dengan antrean job.
+//
+// Diletakkan di sini agar paket notifikasi tidak mengimpor paket pekerja,
+// sama seperti penyambung pembayaran. Job diantre di dalam transaksi
+// pemanggil, sehingga notifikasi tidak pernah terantre untuk perubahan yang
+// ternyata batal.
+type notifyEnqueuer struct{ queue *river.Client[pgx.Tx] }
+
+// EnqueueSendTx mengantre pengiriman satu notifikasi.
+func (n notifyEnqueuer) EnqueueSendTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
+	if n.queue == nil {
+		return nil
+	}
+	_, err := n.queue.InsertTx(ctx, tx, worker.SendNotificationArgs{NotificationID: id}, nil)
+	return err
 }

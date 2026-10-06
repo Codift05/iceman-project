@@ -2,6 +2,8 @@ package delivery_test
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/iceman/backend/internal/catalog"
 	"github.com/iceman/backend/internal/customer"
 	"github.com/iceman/backend/internal/delivery"
+	"github.com/iceman/backend/internal/notify"
 	"github.com/iceman/backend/internal/order"
 	"github.com/iceman/backend/internal/scheduling"
 	"github.com/iceman/backend/internal/store"
@@ -55,7 +58,7 @@ func siapkan(t *testing.T) *lingkungan {
 			Pool: pool, Carts: keranjang, Customers: pelanggan,
 			Slots: scheduling.NewSlots(pool),
 		}),
-		kirim: delivery.NewDeliveries(pool),
+		kirim: delivery.NewDeliveries(delivery.Deps{Pool: pool}),
 	}
 }
 
@@ -263,3 +266,33 @@ func (l *lingkungan) majukan(t *testing.T, deliveryID, drv uuid.UUID, urutan ...
 	}
 	return got
 }
+
+// siapkanDenganNotifikasi menyiapkan lingkungan uji yang notifikasinya hidup.
+//
+// Dipisahkan dari siapkan agar sebagian uji dapat memeriksa bahwa pengiriman
+// tetap berjalan tanpa layanan notifikasi, sesuai BR-010.
+func siapkanDenganNotifikasi(t *testing.T) *lingkungan {
+	t.Helper()
+	l := siapkan(t)
+	notifier := notify.NewService(notify.Deps{
+		Pool:     l.pool,
+		Channels: notify.NewRegistry(notify.LogChannel{Log: diamNotif()}),
+	})
+	l.kirim = delivery.NewDeliveries(delivery.Deps{Pool: l.pool, Notifier: notifier})
+
+	// Seluruh event dinyalakan dengan kanal catatan, supaya yang diuji adalah
+	// pengantreannya, bukan pengaturannya.
+	for _, e := range notify.KnownEvents() {
+		if _, err := l.pool.Exec(context.Background(), `
+			INSERT INTO notification_settings (event, enabled, channels)
+			VALUES ($1, true, $2)
+			ON CONFLICT (event) DO UPDATE
+			SET enabled = true, channels = excluded.channels`,
+			e, []string{notify.ChannelLog}); err != nil {
+			t.Fatalf("menyiapkan pengaturan notifikasi: %v", err)
+		}
+	}
+	return l
+}
+
+func diamNotif() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

@@ -28,7 +28,8 @@ internal/customer   pelanggan, alamat pengiriman, dan termin kontrak
 internal/cart       keranjang di sisi server
 internal/order      checkout, transisi status, dan pesan ulang
 internal/delivery   penugasan driver, modul driver, dan pelacakan posisi
-internal/payment    tagihan, webhook penyedia, dan refund
+internal/payment    tagihan, webhook penyedia, refund, dan rekonsiliasi
+internal/notify     notifikasi event beserta pengaturan dan pemantauannya
 internal/identity   kata sandi, token, faktor kedua, dan hak akses
 internal/worker     job latar di atas antrean River
 internal/audit      jejak audit yang ikut transaksi pemanggil
@@ -73,6 +74,8 @@ db/migrations       migrasi goose, ditanam ke dalam binary
   tangan, pemetaan status penyedia, serta refund penuh maupun sebagian.
 - Rekonsiliasi: pemasukan berkas settlement, laporan selisih per periode,
   penandaan tindak lanjut, koreksi biaya yang teraudit, dan ekspor CSV.
+- Notifikasi event pesanan, pembayaran, dan pengiriman, diantre dalam
+  transaksi yang sama dengan perubahan yang memicunya.
 - Bentuk galat seragam dan pengenal permintaan.
 - Server HTTP dengan endpoint kesehatan dan mematikan diri dengan rapi.
 
@@ -120,6 +123,9 @@ Uji pada `internal/scheduling` adalah inti pembuktian rancangan, bukan pelengkap
 | `TestPemetaanStatus_DiujiBukanHanyaDidokumentasikan` | SRS-PAY-003, seluruh entri pemetaan diperiksa |
 | `TestRekonsiliasi_PembayaranTanpaSettlementTampilSebagaiSelisih` | SRS-PAY-005, yang belum diterima tidak disembunyikan |
 | `TestRekonsiliasi_SettlementTanpaPembayaranTampil` | uang masuk tanpa tagihan ikut tertelusuri |
+| `TestEmit_IkutBatalSaatTransaksiBatal` | notifikasi ikut batal bila transaksinya batal |
+| `TestNotifikasi_DiantreSaatBerangkatDanSelesai` | efek samping "Antre notifikasi" pada tabel transisi benar terjadi |
+| `TestNotifikasi_TanpaLayananTetapBerhasil` | BR-010, kegagalan notifikasi tidak menggagalkan transaksi inti |
 
 Dua uji pembanding terakhir sengaja dipertahankan. Bila suatu saat ada yang
 mengusulkan menghapus `FOR UPDATE` demi kecepatan, jalankan keduanya lebih
@@ -336,6 +342,11 @@ Penolakan `SLOT_FULL` disertai tawaran jadwal terdekat yang masih terbuka.
 Tanpa itu, satu satunya jalan bagi pelanggan adalah mencoba slot satu per satu.
 
 ## Yang menunggu keputusan klien
+
+Kanal notifikasi belum dipilih (OQ-012), dan dua dari empat pilihannya memakai
+WhatsApp yang sudah dikeluarkan dari lingkup. Seluruh jalur notifikasi sudah
+berjalan di atas kanal catatan, dan menyambungkan kanal sungguhan berarti
+menulis satu implementasi antarmuka Channel.
 
 Rute pelanggan untuk keranjang, checkout, dan riwayat belum dipasang karena
 OQ-002 belum diputuskan: cara pelanggan masuk dan kanal pengiriman kode OTP.
@@ -593,3 +604,59 @@ penerimaan satu periode, dan siapa yang membukanya perlu dapat ditelusuri.
 
 Melihat, mengekspor, dan mengubah dipisahkan izinnya: yang boleh membaca
 laporan belum tentu boleh mengubah angkanya.
+
+## Notifikasi
+
+Tabel transisi SRS Bab 5.1 dan 5.3 menyebut "Antre notifikasi" sebagai efek
+samping wajib pada beberapa perpindahan. Sampai domain ini dikerjakan, tidak
+ada yang mengantrenya: janji itu tertulis di matriks namun tidak ditepati.
+Sekarang ditepati, dan ada ujinya yang menjalankan perpindahannya lalu
+memeriksa catatan notifikasinya.
+
+Notifikasi diantre di dalam transaksi yang sama dengan perubahan yang
+memicunya. Notifikasi yang bertahan setelah transaksinya dibatalkan berarti
+pelanggan diberi tahu tentang hal yang tidak pernah terjadi. Ujinya sudah
+diperiksa dengan cara merusaknya: dengan pencatatan dipaksa lewat pool alih
+alih transaksi pemanggil, notifikasi bertahan walau transaksinya dibatalkan.
+
+Kegagalan notifikasi tidak menggagalkan transaksi inti (BR-010). Pengiriman dan
+pesanan tetap berjalan walau layanan notifikasi tidak disetel sama sekali, dan
+ada ujinya.
+
+Satu baris dicatat per kanal aktif, sehingga kegagalan pada satu kanal tidak
+menyembunyikan keberhasilan pada kanal lain. Setiap percobaan menyimpan kanal,
+status, jumlah percobaan, dan alasan kegagalan terakhir (SRS-NOT-001).
+
+Event yang dimatikan admin atau tanpa penerima tetap dicatat sekali sebagai
+dilewati, bukan dibuang. Tanpa itu, pemantauan tidak dapat membedakan
+notifikasi yang sengaja tidak dikirim dari yang hilang tanpa jejak.
+
+Hanya status yang berarti bagi pelanggan yang memicu notifikasi. Driver
+menerima tugas dan tiba di lokasi adalah kemajuan internal; memberitahukannya
+membuat pelanggan menerima pesan yang tidak menuntut tindakan apa pun.
+
+Antrean notifikasi dipisahkan dari antrean baku, supaya lonjakan notifikasi
+tidak menunda pekerjaan yang menyangkut uang dan jadwal.
+
+Kanal yang pengaturannya menyebutnya namun implementasinya belum ada ditandai
+gagal beserta alasannya, bukan dicoba ulang. Mengulanginya tidak mengubah apa
+pun sampai kanalnya disambungkan, dan selama OQ-012 belum diputuskan keadaan
+itu memang terjadi. Karena itu daftar kanal yang tersedia ikut dikirim bersama
+pengaturannya, agar admin melihat bedanya.
+
+Penyapu berkala mengambil notifikasi yang tercatat namun jobnya tidak pernah
+terantre, misalnya karena proses mati setelah commit. Jedanya lima menit agar
+tidak berlomba dengan pekerja yang sedang mengerjakan notifikasi baru, dan yang
+disapu hanya yang berstatus menunggu: yang gagal sudah ditangani percobaan
+ulang jobnya sendiri.
+
+Tabel notifikasi dipartisi menurut bulan dengan masa simpan enam bulan, sesuai
+ERD Bab 9. Fungsi pembuat partisinya disatukan dengan yang dipakai tabel posisi
+driver, karena dua fungsi yang hampir sama berarti dua tempat yang harus
+diperbaiki bila cara penamaannya berubah.
+
+| Endpoint | Izin |
+|---|---|
+| `GET /v1/notifications` | `settings.view` |
+| `GET /v1/notifications/settings` | `settings.view` |
+| `PUT /v1/notifications/settings` | `settings.manage` |
